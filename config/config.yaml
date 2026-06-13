@@ -1,0 +1,71 @@
+# ========================================
+# Forex Multi-Agent Bot — Configuration
+# ========================================
+
+# --- Broker & Data Sources ---
+oanda:
+  websocket_url: "wss://stream-fxtrade.oanda.com/v3/accounts/${OANDA_ACCOUNT_ID}/pricing/stream"
+  api_key: "${OANDA_API_KEY}"
+  account_id: "${OANDA_ACCOUNT_ID}"
+
+twelve_data:
+  api_key: "${TWELVE_DATA_KEY}"
+  base_url: "https://api.twelvedata.com"
+
+alpha_vantage:
+  api_key: "${ALPHA_VANTAGE_KEY}"
+  base_url: "https://www.alphavantage.co/query"
+
+# --- Currency Pairs ---
+pairs:
+  - "EUR_USD"
+  - "GBP_USD"
+
+# --- Timeframes ---
+scheduler:
+  timeframes: ["5m", "15m", "1h", "4h"]
+
+# --- Account Settings ---
+account:
+  balance: 1000.0
+  risk_percent: 1.0
+  default_sl_pips: 20.0
+  default_tp_pips: 40.0
+
+# --- AI & ML ---
+gemini:
+  api_key: "${GEMINI_API_KEY}"
+  model: "gemini-1.5-flash"
+  timeout_ms: 2000
+
+ml_service:
+  enabled: false
+  grpc_address: "localhost:50051"
+  timeout_ms: 500
+
+# --- Signal Thresholds (Decision Agent) ---
+signal:
+  buy_threshold: 0.65
+  sell_threshold: 0.35
+  min_confidence_to_alert: 0.60
+  weights:
+    technical: 0.60
+    fundamental: 0.40
+  ml_boost_weight: 0.20
+
+# --- Storage ---
+timescaledb:
+  dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
+
+redis:
+  address: "localhost:6379"
+  password: "${REDIS_PASSWORD}"
+  sentiment_ttl_minutes: 5
+  price_ttl_seconds: 10
+
+# --- WhatsApp ---
+whatsapp:
+  service_url: "http://localhost:3001"
+  target_phone: "${WA_TARGET_PHONE}"
+  min_confidence_to_alert: 0.60
+  rate_limit_seconds: 180

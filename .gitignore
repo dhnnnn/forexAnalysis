@@ -1,0 +1,37 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/forex-agent
+
+# Go
+/vendor/
+
+# Environment
+.env
+*.env
+!.env.example
+
+# WhatsApp Baileys session
+wa_service/auth_info/
+wa_service/node_modules/
+
+# ML Service
+ml_service/__pycache__/
+ml_service/*.pkl
+ml_service/venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+timescale_data/
