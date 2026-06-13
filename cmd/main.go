@@ -100,6 +100,20 @@ func main() {
 		"cache_ttl", "5m",
 	)
 
+	// ── Inisialisasi Agent 5: DecisionAgent ───────────────────────────
+	signalCfg := agents.SignalConfig{
+		BuyThreshold:  0.65,
+		SellThreshold: 0.35,
+		TechWeight:    0.60,
+		FundWeight:    0.40,
+		MLBoostWeight: 0.20,
+	}
+
+	// ML service disabled → pass nil for mlClient
+	decisionAgent := agents.NewDecisionAgent(signalCfg, nil)
+
+	slog.Info("Agent initialized", "agent", decisionAgent.Name())
+
 	// ── Mulai collecting data di background ──────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
@@ -142,6 +156,29 @@ func main() {
 							slog.Warn("⚠️ FundamentalAgent failed",
 								"pair", pair,
 								"error", fundOutput.Error,
+							)
+						}
+
+						// Run DecisionAgent for final trading signal
+						decisionInput := agents.AgentInput{
+							Pair:        pair,
+							Candles:     candles,
+							Technical:   nil, // TechnicalAgent belum aktif
+							Fundamental: fundOutput.Fundamental,
+							Risk:        nil, // RiskAgent belum aktif
+						}
+						decisionOutput := decisionAgent.Run(ctx, decisionInput)
+						if decisionOutput.Success && decisionOutput.Decision != nil {
+							slog.Info("✅ DecisionAgent completed",
+								"pair", pair,
+								"signal", decisionOutput.Decision.Signal,
+								"confidence", fmt.Sprintf("%.2f", decisionOutput.Decision.Confidence),
+								"risk_level", decisionOutput.Decision.RiskLevel,
+							)
+						} else {
+							slog.Warn("⚠️ DecisionAgent failed",
+								"pair", pair,
+								"error", decisionOutput.Error,
 							)
 						}
 					} else {
