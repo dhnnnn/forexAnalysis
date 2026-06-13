@@ -16,6 +16,13 @@ alpha_vantage:
   api_key: "${ALPHA_VANTAGE_KEY}"
   base_url: "https://www.alphavantage.co/query"
 
+# --- RSS News Feeds ---
+rss_feeds:
+  urls:
+    - "https://www.forexfactory.com/rss"
+    - "https://www.fxstreet.com/rss/news"
+    - "https://www.investing.com/rss/news_14.rss"
+
 # --- Currency Pairs ---
 pairs:
   - "EUR_USD"

@@ -11,6 +11,8 @@ import (
 
 	"github.com/dhnnnn/forex-agent/internal/agents"
 	"github.com/dhnnnn/forex-agent/internal/feed"
+	"github.com/dhnnnn/forex-agent/internal/sentiment"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -58,6 +60,46 @@ func main() {
 		"timeframes", timeframes,
 	)
 
+	// ── Inisialisasi Agent 3: FundamentalAgent ────────────────────────
+
+	// Redis client
+	redisAddr := os.Getenv("REDIS_ADDRESS")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: os.Getenv("REDIS_PASSWORD"),
+	})
+
+	// NewsFetcher with API keys
+	alphaVantageKey := os.Getenv("ALPHA_VANTAGE_KEY")
+	twelveDataKey := os.Getenv("TWELVE_DATA_KEY")
+	rssURLs := []string{
+		"https://www.forexfactory.com/rss",
+	}
+	newsFetcher := sentiment.NewNewsFetcher(alphaVantageKey, twelveDataKey, rssURLs)
+
+	// GeminiClient with API key, model, and 2s timeout
+	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
+	geminiModel := os.Getenv("GEMINI_MODEL")
+	if geminiModel == "" {
+		geminiModel = "gemini-1.5-flash"
+	}
+	geminiClient := sentiment.NewGeminiClient(geminiAPIKey, geminiModel, 2*time.Second)
+
+	// SentimentCache with 5-minute TTL
+	sentimentCache := sentiment.NewSentimentCache(redisClient, 5*time.Minute)
+
+	// FundamentalAgent with all dependencies injected
+	fundamentalAgent := agents.NewFundamentalAgent(geminiClient, newsFetcher, sentimentCache)
+
+	slog.Info("Agent initialized",
+		"agent", fundamentalAgent.Name(),
+		"gemini_model", geminiModel,
+		"cache_ttl", "5m",
+	)
+
 	// ── Mulai collecting data di background ──────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
@@ -85,7 +127,23 @@ func main() {
 							"latest_close", fmt.Sprintf("%.5f", latest.Close),
 							"latest_time", latest.Timestamp.Format("15:04:05"),
 						)
-						// TODO: di sini nanti panggil Agent 2 (TechnicalAgent), dst.
+
+						// Run FundamentalAgent for sentiment analysis
+						fundOutput := fundamentalAgent.Run(ctx, agents.AgentInput{Pair: pair})
+						if fundOutput.Success && fundOutput.Fundamental != nil {
+							slog.Info("✅ FundamentalAgent completed",
+								"pair", pair,
+								"sentiment", fundOutput.Fundamental.Sentiment,
+								"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
+								"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
+								"from_cache", fundOutput.Fundamental.FromCache,
+							)
+						} else {
+							slog.Warn("⚠️ FundamentalAgent failed",
+								"pair", pair,
+								"error", fundOutput.Error,
+							)
+						}
 					} else {
 						bufSize := marketAgent.BufferSize(pair, timeframes[0])
 						slog.Info("⏳ MarketDataAgent collecting...",
