@@ -111,6 +111,43 @@ type RiskOutput struct {
 	RiskAmount float64 `json:"risk_amount"` // nominal risk dalam USD
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// MLPredictor — interface untuk ML prediction service (dependency injection)
+// ════════════════════════════════════════════════════════════════════════
+
+// MLPredictor mengabstraksi layanan prediksi ML untuk dependency injection.
+// Implementasi: gRPC client (internal/ml/client.go), nil-safe no-op, atau test mock.
+type MLPredictor interface {
+	// Predict mengembalikan confidence boost score (0.0–1.0) dari state teknikal.
+	// Return (0.0, error) jika tidak tersedia. Caller harus enforce timeout via ctx.
+	Predict(ctx context.Context, tech *TechnicalOutput, candles []Candle) (float64, error)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// SignalConfig — konfigurasi parameter signal generation
+// ════════════════════════════════════════════════════════════════════════
+
+// SignalConfig menyimpan parameter-parameter untuk signal generation.
+// Diload dari config.yaml bagian `signal`.
+type SignalConfig struct {
+	BuyThreshold  float64 // Score >= ini → BUY (default: 0.65)
+	SellThreshold float64 // Score <= ini → SELL (default: 0.35)
+	TechWeight    float64 // Bobot untuk technical score (default: 0.60)
+	FundWeight    float64 // Bobot untuk fundamental score (default: 0.40)
+	MLBoostWeight float64 // Bobot untuk ML confidence boost (default: 0.20)
+}
+
+// DefaultSignalConfig mengembalikan konfigurasi default yang aman.
+func DefaultSignalConfig() SignalConfig {
+	return SignalConfig{
+		BuyThreshold:  0.65,
+		SellThreshold: 0.35,
+		TechWeight:    0.60,
+		FundWeight:    0.40,
+		MLBoostWeight: 0.20,
+	}
+}
+
 // DecisionOutput — hasil dari DecisionAgent (Agent 5) — sinyal final
 type DecisionOutput struct {
 	Signal     string  `json:"signal"`     // "BUY" | "SELL" | "HOLD"
