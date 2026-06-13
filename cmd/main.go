@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/dhnnnn/forex-agent/internal/agents"
+	"github.com/dhnnnn/forex-agent/internal/config"
 	"github.com/dhnnnn/forex-agent/internal/feed"
 	"github.com/dhnnnn/forex-agent/internal/sentiment"
 	"github.com/redis/go-redis/v9"
@@ -18,7 +19,7 @@ import (
 func main() {
 	// ── Setup structured logging ──────────────────────────────────────
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelDebug,
 	}))
 	slog.SetDefault(logger)
 
@@ -26,99 +27,93 @@ func main() {
 	slog.Info("  🤖 Forex Multi-Agent Bot — Starting...")
 	slog.Info("═══════════════════════════════════════════════")
 
-	// ── Konfigurasi (hardcoded dulu, nanti pindah ke config.yaml) ────
-	pairs := []string{"EUR_USD", "GBP_USD"}
-	timeframes := []string{"1h"}
+	// ── Load configuration from YAML ──────────────────────────────────
+	cfg, err := config.Load("config/config.yaml")
+	if err != nil {
+		slog.Error("Failed to load config", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("Config loaded", "pairs", cfg.Pairs, "timeframes", cfg.Scheduler.Timeframes)
 
-	// ── Context dengan graceful shutdown ──────────────────────────────
+	// ── Context with graceful shutdown ────────────────────────────────
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Tangkap sinyal OS untuk graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// ── Inisialisasi Feed Layer ───────────────────────────────────────
+	// ── Initialize Feed Layer ─────────────────────────────────────────
 	wsFeed := feed.NewWebSocketFeed(
-		"wss://stream-fxtrade.oanda.com", // URL (mock mode dulu)
-		"",                                // API key (kosong = mock)
-		pairs,
+		cfg.Oanda.WebSocketURL,
+		cfg.Oanda.APIKey,
+		cfg.Pairs,
 	)
 
 	restPoller := feed.NewRESTPoller(
-		"https://api.twelvedata.com",
-		"", // API key (kosong = belum dipakai)
-		pairs,
+		cfg.TwelveData.BaseURL,
+		cfg.TwelveData.APIKey,
+		cfg.Pairs,
 	)
 
-	// ── Inisialisasi Agent 1: MarketDataAgent ─────────────────────────
-	marketAgent := agents.NewMarketDataAgent(pairs, timeframes, wsFeed, restPoller)
-
+	// ── Initialize Agent 1: MarketDataAgent ───────────────────────────
+	marketAgent := agents.NewMarketDataAgent(cfg.Pairs, cfg.Scheduler.Timeframes, wsFeed, restPoller)
 	slog.Info("Agent initialized",
 		"agent", marketAgent.Name(),
-		"pairs", pairs,
-		"timeframes", timeframes,
+		"pairs", cfg.Pairs,
+		"timeframes", cfg.Scheduler.Timeframes,
 	)
 
-	// ── Inisialisasi Agent 3: FundamentalAgent ────────────────────────
+	// ── Initialize Agent 2: TechnicalAgent ────────────────────────────
+	technicalAgent := agents.NewTechnicalAgent()
+	slog.Info("Agent initialized", "agent", technicalAgent.Name())
 
-	// Redis client
-	redisAddr := os.Getenv("REDIS_ADDRESS")
-	if redisAddr == "" {
-		redisAddr = "localhost:6379"
-	}
+	// ── Initialize Agent 3: FundamentalAgent ──────────────────────────
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: os.Getenv("REDIS_PASSWORD"),
+		Addr:     cfg.Redis.Address,
+		Password: cfg.Redis.Password,
 	})
 
-	// NewsFetcher with API keys
-	alphaVantageKey := os.Getenv("ALPHA_VANTAGE_KEY")
-	twelveDataKey := os.Getenv("TWELVE_DATA_KEY")
-	rssURLs := []string{
-		"https://www.forexfactory.com/rss",
-	}
-	newsFetcher := sentiment.NewNewsFetcher(alphaVantageKey, twelveDataKey, rssURLs)
-
-	// GeminiClient with API key, model, and 2s timeout
-	geminiAPIKey := os.Getenv("GEMINI_API_KEY")
-	geminiModel := os.Getenv("GEMINI_MODEL")
-	if geminiModel == "" {
-		geminiModel = "gemini-1.5-flash"
-	}
-	geminiClient := sentiment.NewGeminiClient(geminiAPIKey, geminiModel, 2*time.Second)
-
-	// SentimentCache with 5-minute TTL
-	sentimentCache := sentiment.NewSentimentCache(redisClient, 5*time.Minute)
-
-	// FundamentalAgent with all dependencies injected
-	fundamentalAgent := agents.NewFundamentalAgent(geminiClient, newsFetcher, sentimentCache)
-
-	slog.Info("Agent initialized",
-		"agent", fundamentalAgent.Name(),
-		"gemini_model", geminiModel,
-		"cache_ttl", "5m",
+	newsFetcher := sentiment.NewNewsFetcher(
+		cfg.AlphaVantage.APIKey,
+		cfg.TwelveData.APIKey,
+		cfg.RSSFeeds.URLs,
 	)
 
-	// ── Inisialisasi Agent 5: DecisionAgent ───────────────────────────
+	geminiTimeout := time.Duration(cfg.Gemini.TimeoutMs) * time.Millisecond
+	geminiClient := sentiment.NewGeminiClient(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
+
+	sentimentTTL := time.Duration(cfg.Redis.SentimentTTLMin) * time.Minute
+	sentimentCache := sentiment.NewSentimentCache(redisClient, sentimentTTL)
+
+	fundamentalAgent := agents.NewFundamentalAgent(geminiClient, newsFetcher, sentimentCache)
+	slog.Info("Agent initialized",
+		"agent", fundamentalAgent.Name(),
+		"gemini_model", cfg.Gemini.Model,
+		"cache_ttl", sentimentTTL.String(),
+	)
+
+	// ── Initialize Agent 4: RiskAgent ─────────────────────────────────
+	riskAgent := agents.NewRiskAgent()
+	slog.Info("Agent initialized", "agent", riskAgent.Name())
+
+	// ── Initialize Agent 5: DecisionAgent ─────────────────────────────
 	signalCfg := agents.SignalConfig{
-		BuyThreshold:  0.65,
-		SellThreshold: 0.35,
-		TechWeight:    0.60,
-		FundWeight:    0.40,
-		MLBoostWeight: 0.20,
+		BuyThreshold:  cfg.Signal.BuyThreshold,
+		SellThreshold: cfg.Signal.SellThreshold,
+		TechWeight:    cfg.Signal.Weights.Technical,
+		FundWeight:    cfg.Signal.Weights.Fundamental,
+		MLBoostWeight: cfg.Signal.MLBoostWeight,
 	}
 
 	// ML service disabled → pass nil for mlClient
 	decisionAgent := agents.NewDecisionAgent(signalCfg, nil)
-
 	slog.Info("Agent initialized", "agent", decisionAgent.Name())
 
-	// ── Mulai collecting data di background ──────────────────────────
+	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
 
-	// ── Pipeline loop (cek readiness setiap 10 detik) ────────────────
+	// ── Pipeline loop (check readiness every 10 seconds) ──────────────
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -128,64 +123,116 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				for _, pair := range pairs {
-					// Cek apakah Agent 1 sudah punya cukup data
+				for _, pair := range cfg.Pairs {
+					// Agent 1: Check if MarketDataAgent has enough data
 					output := marketAgent.Run(ctx, agents.AgentInput{Pair: pair})
-
-					if output.Success {
-						candles := marketAgent.GetCandles(pair, timeframes[0])
-						latest := candles[len(candles)-1]
-						slog.Info("✅ MarketDataAgent READY — pipeline bisa dimulai",
+					if !output.Success {
+						bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
+						slog.Debug("⏳ MarketDataAgent collecting...",
 							"pair", pair,
-							"candles", len(candles),
-							"latest_close", fmt.Sprintf("%.5f", latest.Close),
-							"latest_time", latest.Timestamp.Format("15:04:05"),
+							"buffer", fmt.Sprintf("%d/%d", bufSize, agents.MinCandlesRequired),
 						)
+						continue
+					}
 
-						// Run FundamentalAgent for sentiment analysis
-						fundOutput := fundamentalAgent.Run(ctx, agents.AgentInput{Pair: pair})
-						if fundOutput.Success && fundOutput.Fundamental != nil {
-							slog.Info("✅ FundamentalAgent completed",
-								"pair", pair,
-								"sentiment", fundOutput.Fundamental.Sentiment,
-								"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
-								"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
-								"from_cache", fundOutput.Fundamental.FromCache,
-							)
-						} else {
-							slog.Warn("⚠️ FundamentalAgent failed",
-								"pair", pair,
-								"error", fundOutput.Error,
-							)
-						}
+					candles := marketAgent.GetCandles(pair, cfg.Scheduler.Timeframes[0])
 
-						// Run DecisionAgent for final trading signal
-						decisionInput := agents.AgentInput{
-							Pair:        pair,
-							Candles:     candles,
-							Technical:   nil, // TechnicalAgent belum aktif
-							Fundamental: fundOutput.Fundamental,
-							Risk:        nil, // RiskAgent belum aktif
-						}
-						decisionOutput := decisionAgent.Run(ctx, decisionInput)
-						if decisionOutput.Success && decisionOutput.Decision != nil {
-							slog.Info("✅ DecisionAgent completed",
+					// Agent 2: Technical Analysis
+					techOutput := technicalAgent.Run(ctx, agents.AgentInput{
+						Pair:    pair,
+						Candles: candles,
+					})
+					if techOutput.Success && techOutput.Technical != nil {
+						slog.Debug("✅ TechnicalAgent completed",
+							"pair", pair,
+							"signal", techOutput.Technical.Signal,
+							"confidence", fmt.Sprintf("%.2f", techOutput.Technical.Confidence),
+							"tech_score", fmt.Sprintf("%.3f", techOutput.Technical.TechScore),
+						)
+					} else {
+						slog.Debug("⚠️ TechnicalAgent failed",
+							"pair", pair,
+							"error", techOutput.Error,
+						)
+					}
+
+					// Agent 3: Fundamental Analysis
+					fundOutput := fundamentalAgent.Run(ctx, agents.AgentInput{Pair: pair})
+					if fundOutput.Success && fundOutput.Fundamental != nil {
+						slog.Debug("✅ FundamentalAgent completed",
+							"pair", pair,
+							"sentiment", fundOutput.Fundamental.Sentiment,
+							"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
+							"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
+							"from_cache", fundOutput.Fundamental.FromCache,
+						)
+					} else {
+						slog.Debug("⚠️ FundamentalAgent failed",
+							"pair", pair,
+							"error", fundOutput.Error,
+						)
+					}
+
+					// Agent 4: Risk Management (needs technical signal)
+					riskInput := agents.AgentInput{
+						Pair:           pair,
+						Candles:        candles,
+						Technical:      techOutput.Technical,
+						AccountBalance: cfg.Account.Balance,
+						RiskPercent:    cfg.Account.RiskPercent,
+					}
+					riskOutput := riskAgent.Run(ctx, riskInput)
+					if riskOutput.Success && riskOutput.Risk != nil {
+						slog.Debug("✅ RiskAgent completed",
+							"pair", pair,
+							"lot_size", fmt.Sprintf("%.2f", riskOutput.Risk.LotSize),
+							"sl", fmt.Sprintf("%.5f", riskOutput.Risk.StopLoss),
+							"tp", fmt.Sprintf("%.5f", riskOutput.Risk.TakeProfit),
+						)
+					} else {
+						slog.Debug("⚠️ RiskAgent failed",
+							"pair", pair,
+							"error", riskOutput.Error,
+						)
+					}
+
+					// Agent 5: Decision (aggregate all)
+					decisionInput := agents.AgentInput{
+						Pair:           pair,
+						Candles:        candles,
+						Technical:      techOutput.Technical,
+						Fundamental:    fundOutput.Fundamental,
+						Risk:           riskOutput.Risk,
+						AccountBalance: cfg.Account.Balance,
+						RiskPercent:    cfg.Account.RiskPercent,
+					}
+					decisionOutput := decisionAgent.Run(ctx, decisionInput)
+
+					// Log final pipeline result at Info level
+					if decisionOutput.Success && decisionOutput.Decision != nil {
+						d := decisionOutput.Decision
+						slog.Info("📊 Pipeline completed",
+							"pair", pair,
+							"signal", d.Signal,
+							"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
+							"risk_level", d.RiskLevel,
+							"tech_signal", d.TechSignal,
+							"fund_sentiment", d.FundSentiment,
+						)
+						if d.Signal != "HOLD" {
+							slog.Info("💰 Trade Signal",
 								"pair", pair,
-								"signal", decisionOutput.Decision.Signal,
-								"confidence", fmt.Sprintf("%.2f", decisionOutput.Decision.Confidence),
-								"risk_level", decisionOutput.Decision.RiskLevel,
-							)
-						} else {
-							slog.Warn("⚠️ DecisionAgent failed",
-								"pair", pair,
-								"error", decisionOutput.Error,
+								"signal", d.Signal,
+								"entry", fmt.Sprintf("%.5f", d.Entry),
+								"sl", fmt.Sprintf("%.5f", d.StopLoss),
+								"tp", fmt.Sprintf("%.5f", d.TakeProfit),
+								"lot", fmt.Sprintf("%.2f", d.LotSize),
 							)
 						}
 					} else {
-						bufSize := marketAgent.BufferSize(pair, timeframes[0])
-						slog.Info("⏳ MarketDataAgent collecting...",
+						slog.Warn("⚠️ DecisionAgent failed",
 							"pair", pair,
-							"buffer", fmt.Sprintf("%d/%d", bufSize, agents.MinCandlesRequired),
+							"error", decisionOutput.Error,
 						)
 					}
 				}
@@ -193,12 +240,12 @@ func main() {
 		}
 	}()
 
-	// ── Tunggu shutdown signal ────────────────────────────────────────
+	// ── Wait for shutdown signal ──────────────────────────────────────
 	sig := <-sigChan
 	slog.Info("Shutdown signal received", "signal", sig)
 	cancel()
 
-	// Beri waktu goroutine untuk cleanup
+	// Give goroutines time to cleanup
 	time.Sleep(1 * time.Second)
 	slog.Info("🛑 Forex Multi-Agent Bot stopped. Bye!")
 }

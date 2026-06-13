@@ -9,4 +9,5 @@ require (
 	github.com/redis/go-redis/v9 v9.20.1 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
