@@ -3,6 +3,7 @@ package feed
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -62,16 +63,16 @@ func (f *WebSocketFeed) Start(ctx context.Context) {
 
 					// Simulasi pergerakan harga kecil (random walk sederhana)
 					variation := float64(t.UnixNano()%100-50) * 0.00001
-					close := price + variation
-					high := close + 0.00020
-					low := close - 0.00015
+					closePrice := price + variation
+					high := math.Max(price, closePrice) + 0.00020
+					low := math.Min(price, closePrice) - 0.00015
 
 					candle := OHLCVCandle{
 						Pair:      pair,
 						Open:      price,
 						High:      high,
 						Low:       low,
-						Close:     close,
+						Close:     closePrice,
 						Volume:    float64(t.Unix() % 10000),
 						Spread:    1.2,
 						Timeframe: "1h",
