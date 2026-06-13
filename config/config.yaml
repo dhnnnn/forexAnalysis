@@ -29,8 +29,10 @@ pairs:
   - "GBP_USD"
 
 # --- Timeframes ---
+# Urutan penting: timeframe pertama adalah "active timeframe" yang dipakai pipeline.
+# Harus match dengan timeframe yang dihasilkan oleh data feed (WebSocket/REST).
 scheduler:
-  timeframes: ["5m", "15m", "1h", "4h"]
+  timeframes: ["1h", "5m", "15m", "4h"]
 
 # --- Account Settings ---
 account:
