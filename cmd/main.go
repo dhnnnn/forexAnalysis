@@ -109,6 +109,18 @@ func main() {
 	decisionAgent := agents.NewDecisionAgent(signalCfg, nil)
 	slog.Info("Agent initialized", "agent", decisionAgent.Name())
 
+	// ── Initialize Agent 6: WhatsAppAgent ─────────────────────────────
+	whatsAppAgent := agents.NewWhatsAppAgent(agents.WhatsAppConfig{
+		ServiceURL:           cfg.WhatsApp.ServiceURL,
+		TargetPhone:          cfg.WhatsApp.TargetPhone,
+		MinConfidenceToAlert: cfg.WhatsApp.MinConfidenceToAlert,
+		RateLimitSeconds:     cfg.WhatsApp.RateLimitSeconds,
+	})
+	slog.Info("Agent initialized", "agent", whatsAppAgent.Name(),
+		"service_url", cfg.WhatsApp.ServiceURL,
+		"rate_limit", fmt.Sprintf("%ds", cfg.WhatsApp.RateLimitSeconds),
+	)
+
 	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
@@ -227,6 +239,19 @@ func main() {
 								"sl", fmt.Sprintf("%.5f", d.StopLoss),
 								"tp", fmt.Sprintf("%.5f", d.TakeProfit),
 								"lot", fmt.Sprintf("%.2f", d.LotSize),
+							)
+						}
+
+						// Agent 6: WhatsApp Notification
+						waInput := agents.AgentInput{
+							Pair:     pair,
+							Decision: decisionOutput.Decision,
+						}
+						waOutput := whatsAppAgent.Run(ctx, waInput)
+						if !waOutput.Success {
+							slog.Debug("⚠️ WhatsAppAgent failed",
+								"pair", pair,
+								"error", waOutput.Error,
 							)
 						}
 					} else {
