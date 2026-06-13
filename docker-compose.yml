@@ -49,6 +49,8 @@ services:
       - .env
     environment:
       - TZ=Asia/Jakarta
+    ports:
+      - "8080:8080"
     depends_on:
       timescaledb:
         condition: service_healthy
@@ -70,8 +72,11 @@ services:
       - "3001:3001"
     environment:
       - PORT=3001
+      - WA_TARGET_PHONE=${WA_TARGET_PHONE}
+      - GO_AGENT_URL=http://forex-agent:8080
     volumes:
       - wa_session:/app/session
+    shm_size: '256m'
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
       interval: 30s

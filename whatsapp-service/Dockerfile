@@ -38,6 +38,9 @@ COPY index.js ./
 # Create session directory for persistent auth
 RUN mkdir -p /app/session
 
+# Use tmpfs-friendly shared memory
+ENV CHROMIUM_FLAGS="--disable-dev-shm-usage"
+
 EXPOSE 3001
 
 CMD ["node", "index.js"]

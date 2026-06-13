@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/dhnnnn/forex-agent/internal/agents"
+	"github.com/dhnnnn/forex-agent/internal/chatbot"
 	"github.com/dhnnnn/forex-agent/internal/config"
 	"github.com/dhnnnn/forex-agent/internal/feed"
 	"github.com/dhnnnn/forex-agent/internal/sentiment"
@@ -124,6 +126,40 @@ func main() {
 	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
+
+	// ── Initialize ChatBot Handler ────────────────────────────────────
+	chatHandler := chatbot.NewHandler()
+	chatHandler.UpdateFromConfig(cfg.Account.Balance, cfg.Account.RiskPercent)
+	chatHandler.SetStatusFunc(func() string {
+		// Cek apakah ada pair yang sudah ready
+		for _, pair := range cfg.Pairs {
+			bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
+			if bufSize >= agents.MinCandlesRequired {
+				return "🟢 Running — pipeline active"
+			}
+		}
+		return "🟡 Warming up — collecting candle data"
+	})
+
+	// ── Start HTTP server for chat ────────────────────────────────────
+	mux := http.NewServeMux()
+	mux.Handle("/chat", chatHandler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	httpServer := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	go func() {
+		slog.Info("HTTP server starting", "addr", ":8080")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("HTTP server error", "error", err)
+		}
+	}()
 
 	// ── Pipeline loop (check readiness every 10 seconds) ──────────────
 	go func() {
@@ -269,6 +305,11 @@ func main() {
 	sig := <-sigChan
 	slog.Info("Shutdown signal received", "signal", sig)
 	cancel()
+
+	// Gracefully shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 
 	// Give goroutines time to cleanup
 	time.Sleep(1 * time.Second)
