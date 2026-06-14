@@ -3,6 +3,7 @@ package agents
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
@@ -20,7 +21,8 @@ var _ Agent = (*DecisionAgent)(nil)
 // confidence scoring dan risk level assessment.
 type DecisionAgent struct {
 	config   SignalConfig
-	mlClient MLPredictor // boleh nil jika ML service tidak tersedia
+	mlClient MLPredictor      // boleh nil jika ML service tidak tersedia
+	kbStore  *knowledge.Store // boleh nil jika KB tidak tersedia
 }
 
 // NewDecisionAgent membuat instance DecisionAgent baru dengan konfigurasi yang telah divalidasi.
@@ -30,6 +32,12 @@ func NewDecisionAgent(config SignalConfig, mlClient MLPredictor) *DecisionAgent 
 		config:   validateConfig(config),
 		mlClient: mlClient,
 	}
+}
+
+// SetKBStore mengatur knowledge base store untuk adaptive weights.
+// Dipanggil setelah NewDecisionAgent jika KB tersedia.
+func (a *DecisionAgent) SetKBStore(store *knowledge.Store) {
+	a.kbStore = store
 }
 
 // Name mengembalikan identifier agent.
@@ -59,18 +67,19 @@ func (a *DecisionAgent) Run(ctx context.Context, input AgentInput) AgentOutput {
 	fund := input.Fundamental
 	risk := input.Risk
 
-	// 3. Calculate weighted score
-	weightedScore := calcWeightedScore(tech, fund, a.config)
+	// 3. Calculate weighted score — adaptive jika KB + regime tersedia
+	activeCfg := a.getAdaptiveConfig(ctx, input.Regime)
+	weightedScore := calcWeightedScore(tech, fund, activeCfg)
 
 	// 4. Determine signal from thresholds
-	signal := determineSignal(weightedScore, a.config)
+	signal := determineSignal(weightedScore, activeCfg)
 
 	// 5. Calculate base confidence
-	confidence := calcConfidence(tech, fund, a.config)
+	confidence := calcConfidence(tech, fund, activeCfg)
 
 	// 6. Optional ML boost
 	var mlScore float64
-	confidence, mlScore = applyMLBoost(ctx, confidence, a.mlClient, tech, input.Candles, a.config)
+	confidence, mlScore = applyMLBoost(ctx, confidence, a.mlClient, tech, input.Candles, activeCfg)
 
 	// 7. Assess risk level
 	riskLevel := assessRiskLevel(confidence)
@@ -291,4 +300,107 @@ func regimeStr(regime *knowledge.RegimeContext) string {
 		return "unknown"
 	}
 	return string(regime.Regime)
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Adaptive Weights — bobot dinamis berdasarkan KnowledgeRule dari KB
+// ════════════════════════════════════════════════════════════════════════
+
+// getAdaptiveConfig mengembalikan SignalConfig yang sudah di-adjust berdasarkan
+// KnowledgeRules aktif untuk regime saat ini. Jika KB tidak tersedia atau
+// tidak ada rules, return config default (static weights).
+func (a *DecisionAgent) getAdaptiveConfig(ctx context.Context, regime *knowledge.RegimeContext) SignalConfig {
+	// Jika KB atau regime tidak tersedia, gunakan static config
+	if a.kbStore == nil || regime == nil {
+		return a.config
+	}
+
+	// Ambil rules aktif untuk regime ini
+	rules, err := a.kbStore.GetRulesForRegime(ctx, regime.Regime)
+	if err != nil || len(rules) == 0 {
+		return a.config
+	}
+
+	// Mulai dari base weights
+	techWeight := a.config.TechWeight
+	fundWeight := a.config.FundWeight
+
+	// Terapkan setiap rule
+	applied := 0
+	for _, rule := range rules {
+		// Cek kondisi ADX jika ada
+		if rule.Condition.ADXBelow != nil && regime.ADX > *rule.Condition.ADXBelow {
+			continue
+		}
+		if rule.Condition.ADXAbove != nil && regime.ADX < *rule.Condition.ADXAbove {
+			continue
+		}
+		// Cek kondisi Volatility jika ada
+		if rule.Condition.VolBelow != nil && regime.Volatility > *rule.Condition.VolBelow {
+			continue
+		}
+		if rule.Condition.VolAbove != nil && regime.Volatility < *rule.Condition.VolAbove {
+			continue
+		}
+
+		// Terapkan weight delta ke target agent
+		switch rule.Action.TargetAgent {
+		case "TechnicalAgent":
+			techWeight += rule.Action.WeightDelta
+			if techWeight < rule.Action.MinWeight {
+				techWeight = rule.Action.MinWeight
+			}
+		case "FundamentalAgent":
+			fundWeight += rule.Action.WeightDelta
+			if fundWeight < rule.Action.MinWeight {
+				fundWeight = rule.Action.MinWeight
+			}
+		}
+		applied++
+	}
+
+	if applied == 0 {
+		return a.config
+	}
+
+	// Normalisasi: pastikan jumlah = 1.0
+	total := techWeight + fundWeight
+	if total > 0 {
+		techWeight /= total
+		fundWeight /= total
+	} else {
+		// Safety fallback
+		techWeight = a.config.TechWeight
+		fundWeight = a.config.FundWeight
+	}
+
+	// Clamp ke range yang aman (tidak terlalu ekstrem)
+	techWeight = clampRange(techWeight, 0.15, 0.85)
+	fundWeight = 1.0 - techWeight
+
+	slog.Debug("🧠 Adaptive weights applied",
+		"regime", string(regime.Regime),
+		"tech_weight", fmt.Sprintf("%.2f", techWeight),
+		"fund_weight", fmt.Sprintf("%.2f", fundWeight),
+		"rules_applied", applied,
+		"base_tech", fmt.Sprintf("%.2f", a.config.TechWeight),
+		"base_fund", fmt.Sprintf("%.2f", a.config.FundWeight),
+	)
+
+	// Return modified config
+	cfg := a.config
+	cfg.TechWeight = techWeight
+	cfg.FundWeight = fundWeight
+	return cfg
+}
+
+// clampRange membatasi nilai v ke dalam rentang [min, max].
+func clampRange(v, min, max float64) float64 {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }

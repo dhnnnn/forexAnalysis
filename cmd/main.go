@@ -163,6 +163,9 @@ func main() {
 	kbStore := knowledge.NewStore(redisClient)
 	slog.Info("Knowledge Store initialized (Redis)")
 
+	// Hook KB Store ke DecisionAgent untuk adaptive weights
+	decisionAgent.SetKBStore(kbStore)
+
 	// ── Initialize Signal Store (untuk evaluator) ─────────────────────
 	signalStore := agents.NewSignalStore()
 	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
