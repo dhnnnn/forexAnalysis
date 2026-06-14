@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dhnnnn/forex-agent/internal/sentiment"
+	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 )
 
 // Compile-time check that FundamentalAgent implements Agent.

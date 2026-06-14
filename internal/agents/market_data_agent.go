@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dhnnnn/forex-agent/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/feed"
 )
 
 const (

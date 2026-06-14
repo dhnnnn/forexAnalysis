@@ -8,7 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/dhnnnn/forex-agent/internal/agents"
+	"github.com/dhnnnn/forexAnalysis/internal/agents"
 )
 
 // ════════════════════════════════════════════════════════════════════════

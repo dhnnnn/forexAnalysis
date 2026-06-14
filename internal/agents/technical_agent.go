@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dhnnnn/forex-agent/internal/indicators"
+	"github.com/dhnnnn/forexAnalysis/internal/indicators"
 )
 
 // TechnicalAgent (Agent 2) computes technical indicators and produces

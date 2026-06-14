@@ -1,4 +1,4 @@
-module github.com/dhnnnn/forex-agent
+module github.com/dhnnnn/forexAnalysis
 
 go 1.25.0
 

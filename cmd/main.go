@@ -11,12 +11,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dhnnnn/forex-agent/internal/agents"
-	"github.com/dhnnnn/forex-agent/internal/chatbot"
-	"github.com/dhnnnn/forex-agent/internal/config"
-	"github.com/dhnnnn/forex-agent/internal/feed"
-	"github.com/dhnnnn/forex-agent/internal/sentiment"
-	"github.com/dhnnnn/forex-agent/internal/storage"
+	"github.com/dhnnnn/forexAnalysis/internal/agents"
+	"github.com/dhnnnn/forexAnalysis/internal/chatbot"
+	"github.com/dhnnnn/forexAnalysis/internal/config"
+	"github.com/dhnnnn/forexAnalysis/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
+	"github.com/dhnnnn/forexAnalysis/internal/storage"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )

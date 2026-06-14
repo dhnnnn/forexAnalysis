@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dhnnnn/forex-agent/internal/agents"
+	"github.com/dhnnnn/forexAnalysis/internal/agents"
 )
 
 // ════════════════════════════════════════════════════════════════════════
