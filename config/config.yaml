@@ -69,6 +69,27 @@ signal:
     fundamental: 0.40
   ml_boost_weight: 0.20
 
+# --- Regime Detection ---
+regime_detection:
+  adx_period: 14
+  atr_period: 14
+  adx_threshold: 25.0       # ADX > 25 = trending (standar industri)
+  vol_threshold: 0.015      # ATR/price > 1.5% = high volatility
+
+# --- Meta Observer ---
+meta_observer:
+  rolling_window: 20         # evaluasi 20 sinyal terakhir
+  drop_threshold: 0.20       # penurunan akurasi 20% trigger report
+  loss_streak_trigger: 4     # 4 loss berturut = trigger report
+  eval_delay_minutes: 30     # tunggu 30 menit sebelum evaluasi sinyal
+  pip_threshold: 15          # sinyal dianggap benar jika harga gerak >= 15 pip
+
+# --- Knowledge Transfer ---
+knowledge_transfer:
+  rule_ttl_hours: 24         # rule expired setelah 24 jam
+  min_confidence: 0.60       # confidence minimum untuk simpan rule
+  timeout_ms: 10000          # timeout LLM call (10 detik)
+
 # --- Storage ---
 timescaledb:
   dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"

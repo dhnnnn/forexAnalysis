@@ -15,6 +15,7 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/chatbot"
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 	"github.com/dhnnnn/forexAnalysis/internal/storage"
 	"github.com/redis/go-redis/v9"
@@ -81,6 +82,15 @@ func main() {
 	technicalAgent := agents.NewTechnicalAgent()
 	slog.Info("Agent initialized", "agent", technicalAgent.Name())
 
+	// ── Initialize RegimeDetectionAgent ───────────────────────────────
+	regimeAgent := agents.NewRegimeDetectionAgentWithConfig(agents.RegimeConfig{
+		ADXPeriod:    cfg.RegimeDetect.ADXPeriod,
+		ATRPeriod:    cfg.RegimeDetect.ATRPeriod,
+		ADXThreshold: cfg.RegimeDetect.ADXThreshold,
+		VolThreshold: cfg.RegimeDetect.VolThreshold,
+	})
+	slog.Info("Agent initialized", "agent", regimeAgent.Name())
+
 	// ── Initialize Agent 3: FundamentalAgent ──────────────────────────
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     cfg.Redis.Address,
@@ -133,6 +143,60 @@ func main() {
 	slog.Info("Agent initialized", "agent", whatsAppAgent.Name(),
 		"service_url", cfg.WhatsApp.ServiceURL,
 		"rate_limit", fmt.Sprintf("%ds", cfg.WhatsApp.RateLimitSeconds),
+	)
+
+	// ── Initialize MetaObserverAgent ──────────────────────────────────
+	metaObserver := agents.NewMetaObserverAgentWithConfig(agents.MetaObserverConfig{
+		RollingWindow:     cfg.MetaObserver.RollingWindow,
+		DropThreshold:     cfg.MetaObserver.DropThreshold,
+		LossStreakTrigger: cfg.MetaObserver.LossStreakTrigger,
+	})
+	metaObserver.RegisterAgent("TechnicalAgent")
+	metaObserver.RegisterAgent("FundamentalAgent")
+	slog.Info("Agent initialized", "agent", metaObserver.Name(),
+		"rolling_window", cfg.MetaObserver.RollingWindow,
+		"drop_threshold", cfg.MetaObserver.DropThreshold,
+		"loss_streak_trigger", cfg.MetaObserver.LossStreakTrigger,
+	)
+
+	// ── Initialize Knowledge Store (Redis) ────────────────────────────
+	kbStore := knowledge.NewStore(redisClient)
+	slog.Info("Knowledge Store initialized (Redis)")
+
+	// Hook KB Store ke DecisionAgent untuk adaptive weights
+	decisionAgent.SetKBStore(kbStore)
+
+	// ── Initialize Signal Store (untuk evaluator) ─────────────────────
+	signalStore := agents.NewSignalStore()
+	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
+	pipThreshold := cfg.MetaObserver.PipThreshold
+	slog.Info("Signal evaluator configured",
+		"eval_delay", evalDelay.String(),
+		"pip_threshold", pipThreshold,
+	)
+
+	// ── Initialize KnowledgeTransferAgent ─────────────────────────────
+	ktaTimeout := time.Duration(cfg.KnowledgeTransfer.TimeoutMs) * time.Millisecond
+	if ktaTimeout == 0 {
+		ktaTimeout = 10 * time.Second
+	}
+	ktaRuleTTL := time.Duration(cfg.KnowledgeTransfer.RuleTTLHours) * time.Hour
+	if ktaRuleTTL == 0 {
+		ktaRuleTTL = 24 * time.Hour
+	}
+
+	ktaAgent := agents.NewKnowledgeTransferAgent(agents.KTAConfig{
+		GeminiAPIKey:  cfg.Gemini.APIKey,
+		GeminiModel:   cfg.Gemini.Model,
+		GroqAPIKey:    cfg.Groq.APIKey,
+		GroqModel:     cfg.Groq.Model,
+		Timeout:       ktaTimeout,
+		RuleTTL:       ktaRuleTTL,
+		MinConfidence: cfg.KnowledgeTransfer.MinConfidence,
+	}, kbStore)
+	slog.Info("Agent initialized", "agent", ktaAgent.Name(),
+		"rule_ttl", ktaRuleTTL.String(),
+		"min_confidence", cfg.KnowledgeTransfer.MinConfidence,
 	)
 
 	// ── Start collecting data in background ───────────────────────────
@@ -199,11 +263,68 @@ func main() {
 					wg.Add(1)
 					go func(pair string) {
 						defer wg.Done()
-						runPipeline(ctx, pair, cfg, marketAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, chatHandler, store)
+						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
+							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, chatHandler, store)
 					}(pair)
 				}
 				wg.Wait()
+
+				// Setelah pipeline selesai, cek MetaObserver untuk ExperienceReport
+				reports := metaObserver.Observe()
+				if len(reports) > 0 {
+					slog.Info("🚨 MetaObserver detected degradation", "report_count", len(reports))
+
+					// KnowledgeTransferAgent: proses reports → KnowledgeRules
+					newRules := ktaAgent.Process(ctx, reports)
+					if len(newRules) > 0 {
+						slog.Info("✨ KTA generated new rules",
+							"rule_count", len(newRules),
+						)
+					}
+				}
+
+				// Persist metrics ke Redis
+				metrics := metaObserver.GetMetrics()
+				if err := kbStore.SaveAllMetrics(ctx, metrics); err != nil {
+					slog.Debug("⚠️ Failed to save metrics to Redis", "error", err)
+				}
+			}
+		}
+	}()
+
+	// ── Evaluator Goroutine — evaluasi sinyal setelah delay ───────────
+	go func() {
+		evalTicker := time.NewTicker(1 * time.Minute) // cek setiap menit apakah ada sinyal ready
+		defer evalTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-evalTicker.C:
+				readySignals := signalStore.GetReadyForEvaluation()
+				if len(readySignals) == 0 {
+					continue
+				}
+
+				for _, sig := range readySignals {
+					correct := evaluateSignal(sig, marketAgent, cfg.Scheduler.Timeframes[0], pipThreshold)
+					metaObserver.RecordOutcome(agents.SignalOutcome{
+						AgentName: "TechnicalAgent", // Evaluasi sebagai technical signal
+						Pair:      sig.Pair,
+						Correct:   correct,
+						Regime:    sig.Regime,
+						Timestamp: time.Now(),
+					})
+
+					slog.Debug("📋 Signal evaluated",
+						"pair", sig.Pair,
+						"signal", sig.Signal,
+						"entry", fmt.Sprintf("%.5f", sig.Entry),
+						"correct", correct,
+						"regime", string(sig.Regime),
+					)
+				}
 			}
 		}
 	}()
@@ -232,11 +353,15 @@ func runPipeline(
 	pair string,
 	cfg *config.Config,
 	marketAgent *agents.MarketDataAgent,
+	regimeAgent *agents.RegimeDetectionAgent,
 	technicalAgent *agents.TechnicalAgent,
 	fundamentalAgent *agents.FundamentalAgent,
 	riskAgent *agents.RiskAgent,
 	decisionAgent *agents.DecisionAgent,
 	whatsAppAgent *agents.WhatsAppAgent,
+	metaObserver *agents.MetaObserverAgent,
+	signalStore *agents.SignalStore,
+	evalDelay time.Duration,
 	chatHandler *chatbot.Handler,
 	store *storage.Store,
 ) {
@@ -262,6 +387,17 @@ func runPipeline(
 		}()
 	}
 
+	// ── Regime Detection: klasifikasi kondisi pasar ───────────────────
+	regimeCtx := regimeAgent.Detect(ctx, pair, candles)
+	slog.Debug("🔍 RegimeDetection completed",
+		"pair", pair,
+		"regime", string(regimeCtx.Regime),
+		"adx", fmt.Sprintf("%.2f", regimeCtx.ADX),
+		"atr", fmt.Sprintf("%.6f", regimeCtx.ATR),
+		"volatility", fmt.Sprintf("%.4f", regimeCtx.Volatility),
+		"trend_strength", fmt.Sprintf("%.2f", regimeCtx.TrendStrength),
+	)
+
 	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
 	var techOutput, fundOutput agents.AgentOutput
 
@@ -271,6 +407,7 @@ func runPipeline(
 		techOutput = technicalAgent.Run(gCtx, agents.AgentInput{
 			Pair:    pair,
 			Candles: candles,
+			Regime:  &regimeCtx,
 		})
 		if techOutput.Success && techOutput.Technical != nil {
 			slog.Debug("✅ TechnicalAgent completed",
@@ -286,7 +423,7 @@ func runPipeline(
 	})
 
 	g.Go(func() error {
-		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair})
+		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair, Regime: &regimeCtx})
 		if fundOutput.Success && fundOutput.Fundamental != nil {
 			slog.Debug("✅ FundamentalAgent completed",
 				"pair", pair,
@@ -309,6 +446,7 @@ func runPipeline(
 		Pair:           pair,
 		Candles:        candles,
 		Technical:      techOutput.Technical,
+		Regime:         &regimeCtx,
 		AccountBalance: cfg.Account.Balance,
 		RiskPercent:    cfg.Account.RiskPercent,
 	}
@@ -331,6 +469,7 @@ func runPipeline(
 		Technical:      techOutput.Technical,
 		Fundamental:    fundOutput.Fundamental,
 		Risk:           riskOutput.Risk,
+		Regime:         &regimeCtx,
 		AccountBalance: cfg.Account.Balance,
 		RiskPercent:    cfg.Account.RiskPercent,
 	}
@@ -344,6 +483,7 @@ func runPipeline(
 			"signal", d.Signal,
 			"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
 			"risk_level", d.RiskLevel,
+			"regime", d.Regime,
 			"tech_signal", d.TechSignal,
 			"fund_sentiment", d.FundSentiment,
 		)
@@ -367,6 +507,16 @@ func runPipeline(
 				"tp", fmt.Sprintf("%.5f", d.TakeProfit),
 				"lot", fmt.Sprintf("%.2f", d.LotSize),
 			)
+
+			// Simpan ke signal store untuk evaluasi nanti oleh MetaObserver
+			signalStore.Add(agents.PendingSignal{
+				Pair:      pair,
+				Signal:    d.Signal,
+				Entry:     d.Entry,
+				Regime:    knowledge.MarketRegime(d.Regime),
+				CreatedAt: time.Now(),
+				EvalAfter: time.Now().Add(evalDelay),
+			})
 		}
 
 		// ── Agent 6: WhatsApp Notification ────────────────────────────
@@ -380,5 +530,39 @@ func runPipeline(
 		}
 	} else {
 		slog.Warn("⚠️ DecisionAgent failed", "pair", pair, "error", decisionOutput.Error)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// evaluateSignal — cek apakah sinyal benar berdasarkan pergerakan harga aktual
+// ════════════════════════════════════════════════════════════════════════════════
+
+// evaluateSignal membandingkan harga entry dengan harga saat ini.
+// Sinyal dianggap benar jika harga bergerak >= pipThreshold pip ke arah prediksi.
+// Jika data harga tidak tersedia, default ke false (conservative).
+func evaluateSignal(sig agents.PendingSignal, marketAgent *agents.MarketDataAgent, timeframe string, pipThreshold float64) bool {
+	// Ambil harga terbaru dari buffer
+	latest := marketAgent.GetLatestCandle(sig.Pair, timeframe)
+	if latest == nil {
+		return false // tidak ada data, anggap salah (conservative)
+	}
+
+	currentPrice := latest.Close
+	pipSize := 0.0001 // Major pairs
+	if len(sig.Pair) > 3 && (sig.Pair[4:] == "JPY" || sig.Pair[:3] == "JPY") {
+		pipSize = 0.01 // JPY pairs
+	}
+
+	pipsMove := (currentPrice - sig.Entry) / pipSize
+
+	switch sig.Signal {
+	case "BUY":
+		// BUY benar jika harga naik >= pipThreshold
+		return pipsMove >= pipThreshold
+	case "SELL":
+		// SELL benar jika harga turun >= pipThreshold
+		return -pipsMove >= pipThreshold
+	default:
+		return false
 	}
 }
