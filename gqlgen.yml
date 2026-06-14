@@ -1,0 +1,44 @@
+# gqlgen configuration
+schema:
+  - internal/graph/schema.graphqls
+
+exec:
+  filename: internal/graph/generated.go
+  package: graph
+
+model:
+  filename: internal/graph/model/models_gen.go
+  package: model
+
+resolver:
+  layout: follow-schema
+  dir: internal/graph
+  package: graph
+  filename_template: "{name}.resolvers.go"
+
+# Skip generating models for types we'll define manually
+models:
+  Candle:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.Candle
+  SignalEntry:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.SignalEntry
+  AgentDebateEntry:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.AgentDebateEntry
+  AgentDetails:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.AgentDetails
+  RegimeContext:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.RegimeContext
+  RegimeChange:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.RegimeChange
+  KnowledgeRule:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.KnowledgeRule
+  AgentSummary:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.AgentSummary
+  PerformanceLog:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.PerformanceLog
+  SystemLog:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.SystemLog
+  PipelineEvent:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.PipelineEvent
+  AdaptiveWeights:
+    model: github.com/dhnnnn/forexAnalysis/internal/graph/model.AdaptiveWeights

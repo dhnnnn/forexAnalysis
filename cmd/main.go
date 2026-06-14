@@ -2,12 +2,10 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -15,11 +13,12 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/chatbot"
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/graph"
 	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
+	"github.com/dhnnnn/forexAnalysis/internal/pipeline"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 	"github.com/dhnnnn/forexAnalysis/internal/storage"
 	"github.com/redis/go-redis/v9"
-	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -57,70 +56,35 @@ func main() {
 		defer store.Close()
 	}
 
+	// ── Initialize Redis ──────────────────────────────────────────────
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.Address,
+		Password: cfg.Redis.Password,
+	})
+
 	// ── Initialize Feed Layer ─────────────────────────────────────────
-	wsFeed := feed.NewWebSocketFeed(
-		cfg.Oanda.WebSocketURL,
-		cfg.Oanda.APIKey,
-		cfg.Pairs,
-	)
+	wsFeed := feed.NewWebSocketFeed(cfg.Oanda.WebSocketURL, cfg.Oanda.APIKey, cfg.Pairs)
+	restPoller := feed.NewRESTPoller(cfg.TwelveData.BaseURL, cfg.TwelveData.APIKey, cfg.Pairs)
 
-	restPoller := feed.NewRESTPoller(
-		cfg.TwelveData.BaseURL,
-		cfg.TwelveData.APIKey,
-		cfg.Pairs,
-	)
-
-	// ── Initialize Agent 1: MarketDataAgent ───────────────────────────
+	// ── Initialize All Agents ─────────────────────────────────────────
 	marketAgent := agents.NewMarketDataAgent(cfg.Pairs, cfg.Scheduler.Timeframes, wsFeed, restPoller)
-	slog.Info("Agent initialized",
-		"agent", marketAgent.Name(),
-		"pairs", cfg.Pairs,
-		"timeframes", cfg.Scheduler.Timeframes,
-	)
-
-	// ── Initialize Agent 2: TechnicalAgent ────────────────────────────
 	technicalAgent := agents.NewTechnicalAgent()
-	slog.Info("Agent initialized", "agent", technicalAgent.Name())
-
-	// ── Initialize RegimeDetectionAgent ───────────────────────────────
 	regimeAgent := agents.NewRegimeDetectionAgentWithConfig(agents.RegimeConfig{
 		ADXPeriod:    cfg.RegimeDetect.ADXPeriod,
 		ATRPeriod:    cfg.RegimeDetect.ATRPeriod,
 		ADXThreshold: cfg.RegimeDetect.ADXThreshold,
 		VolThreshold: cfg.RegimeDetect.VolThreshold,
 	})
-	slog.Info("Agent initialized", "agent", regimeAgent.Name())
-
-	// ── Initialize Agent 3: FundamentalAgent ──────────────────────────
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     cfg.Redis.Address,
-		Password: cfg.Redis.Password,
-	})
-
-	newsFetcher := sentiment.NewNewsFetcher(
-		cfg.AlphaVantage.APIKey,
-		cfg.TwelveData.APIKey,
-		cfg.RSSFeeds.URLs,
-	)
 
 	geminiTimeout := time.Duration(cfg.Gemini.TimeoutMs) * time.Millisecond
 	geminiClient := sentiment.NewGeminiClient(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
-
 	sentimentTTL := time.Duration(cfg.Redis.SentimentTTLMin) * time.Minute
 	sentimentCache := sentiment.NewSentimentCache(redisClient, sentimentTTL)
-
+	newsFetcher := sentiment.NewNewsFetcher(cfg.AlphaVantage.APIKey, cfg.TwelveData.APIKey, cfg.RSSFeeds.URLs)
 	fundamentalAgent := agents.NewFundamentalAgent(geminiClient, newsFetcher, sentimentCache)
-	slog.Info("Agent initialized",
-		"agent", fundamentalAgent.Name(),
-		"gemini_model", cfg.Gemini.Model,
-		"cache_ttl", sentimentTTL.String(),
-	)
 
-	// ── Initialize Agent 4: RiskAgent ─────────────────────────────────
 	riskAgent := agents.NewRiskAgent()
-	slog.Info("Agent initialized", "agent", riskAgent.Name())
 
-	// ── Initialize Agent 5: DecisionAgent ─────────────────────────────
 	signalCfg := agents.SignalConfig{
 		BuyThreshold:  cfg.Signal.BuyThreshold,
 		SellThreshold: cfg.Signal.SellThreshold,
@@ -128,24 +92,15 @@ func main() {
 		FundWeight:    cfg.Signal.Weights.Fundamental,
 		MLBoostWeight: cfg.Signal.MLBoostWeight,
 	}
-
-	// ML service disabled → pass nil for mlClient
 	decisionAgent := agents.NewDecisionAgent(signalCfg, nil)
-	slog.Info("Agent initialized", "agent", decisionAgent.Name())
 
-	// ── Initialize Agent 6: WhatsAppAgent ─────────────────────────────
 	whatsAppAgent := agents.NewWhatsAppAgent(agents.WhatsAppConfig{
 		ServiceURL:           cfg.WhatsApp.ServiceURL,
 		TargetPhone:          cfg.WhatsApp.TargetPhone,
 		MinConfidenceToAlert: cfg.WhatsApp.MinConfidenceToAlert,
 		RateLimitSeconds:     cfg.WhatsApp.RateLimitSeconds,
 	})
-	slog.Info("Agent initialized", "agent", whatsAppAgent.Name(),
-		"service_url", cfg.WhatsApp.ServiceURL,
-		"rate_limit", fmt.Sprintf("%ds", cfg.WhatsApp.RateLimitSeconds),
-	)
 
-	// ── Initialize MetaObserverAgent ──────────────────────────────────
 	metaObserver := agents.NewMetaObserverAgentWithConfig(agents.MetaObserverConfig{
 		RollingWindow:     cfg.MetaObserver.RollingWindow,
 		DropThreshold:     cfg.MetaObserver.DropThreshold,
@@ -153,29 +108,14 @@ func main() {
 	})
 	metaObserver.RegisterAgent("TechnicalAgent")
 	metaObserver.RegisterAgent("FundamentalAgent")
-	slog.Info("Agent initialized", "agent", metaObserver.Name(),
-		"rolling_window", cfg.MetaObserver.RollingWindow,
-		"drop_threshold", cfg.MetaObserver.DropThreshold,
-		"loss_streak_trigger", cfg.MetaObserver.LossStreakTrigger,
-	)
 
-	// ── Initialize Knowledge Store (Redis) ────────────────────────────
+	// ── Initialize Knowledge System ───────────────────────────────────
 	kbStore := knowledge.NewStore(redisClient)
-	slog.Info("Knowledge Store initialized (Redis)")
-
-	// Hook KB Store ke DecisionAgent untuk adaptive weights
 	decisionAgent.SetKBStore(kbStore)
 
-	// ── Initialize Signal Store (untuk evaluator) ─────────────────────
-	signalStore := agents.NewSignalStore()
-	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
-	pipThreshold := cfg.MetaObserver.PipThreshold
-	slog.Info("Signal evaluator configured",
-		"eval_delay", evalDelay.String(),
-		"pip_threshold", pipThreshold,
-	)
+	broadcaster := knowledge.NewBroadcaster(kbStore)
+	broadcaster.Subscribe(technicalAgent)
 
-	// ── Initialize KnowledgeTransferAgent ─────────────────────────────
 	ktaTimeout := time.Duration(cfg.KnowledgeTransfer.TimeoutMs) * time.Millisecond
 	if ktaTimeout == 0 {
 		ktaTimeout = 10 * time.Second
@@ -184,7 +124,6 @@ func main() {
 	if ktaRuleTTL == 0 {
 		ktaRuleTTL = 24 * time.Hour
 	}
-
 	ktaAgent := agents.NewKnowledgeTransferAgent(agents.KTAConfig{
 		GeminiAPIKey:  cfg.Gemini.APIKey,
 		GeminiModel:   cfg.Gemini.Model,
@@ -194,12 +133,46 @@ func main() {
 		RuleTTL:       ktaRuleTTL,
 		MinConfidence: cfg.KnowledgeTransfer.MinConfidence,
 	}, kbStore)
-	slog.Info("Agent initialized", "agent", ktaAgent.Name(),
-		"rule_ttl", ktaRuleTTL.String(),
-		"min_confidence", cfg.KnowledgeTransfer.MinConfidence,
+
+	// ── Initialize GraphQL PubSub ─────────────────────────────────────
+	gqlPubSub := graph.NewPubSub()
+
+	// ── Build Pipeline ────────────────────────────────────────────────
+	signalStore := agents.NewSignalStore()
+	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
+
+	p := pipeline.NewPipeline(pipeline.PipelineDeps{
+		MarketAgent:      marketAgent,
+		RegimeAgent:      regimeAgent,
+		TechnicalAgent:   technicalAgent,
+		FundamentalAgent: fundamentalAgent,
+		RiskAgent:        riskAgent,
+		DecisionAgent:    decisionAgent,
+		WhatsAppAgent:    whatsAppAgent,
+		MetaObserver:     metaObserver,
+		KTAAgent:         ktaAgent,
+		SignalStore:      signalStore,
+		Broadcaster:      broadcaster,
+		PubSub:           gqlPubSub,
+		ChatHandler:      nil, // set below after chatHandler init
+		Store:            store,
+		KBStore:          kbStore,
+	}, pipeline.PipelineConfig{
+		EvalDelay:      evalDelay,
+		PipThreshold:   cfg.MetaObserver.PipThreshold,
+		Pairs:          cfg.Pairs,
+		Timeframes:     cfg.Scheduler.Timeframes,
+		AccountBalance: cfg.Account.Balance,
+		RiskPercent:    cfg.Account.RiskPercent,
+	})
+
+	slog.Info("Pipeline built",
+		"pairs", cfg.Pairs,
+		"eval_delay", evalDelay.String(),
+		"pip_threshold", cfg.MetaObserver.PipThreshold,
 	)
 
-	// ── Start collecting data in background ───────────────────────────
+	// ── Start Market Data Collection ──────────────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
 
@@ -208,26 +181,24 @@ func main() {
 	chatHandler.UpdateFromConfig(cfg.Account.Balance, cfg.Account.RiskPercent)
 	chatHandler.SetPairs(cfg.Pairs)
 	chatHandler.SetStatusFunc(func() string {
-		// Cek apakah ada pair yang sudah ready
 		for _, pair := range cfg.Pairs {
-			bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
-			if bufSize >= agents.MinCandlesRequired {
+			if marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0]) >= agents.MinCandlesRequired {
 				return "🟢 Running — pipeline active"
 			}
 		}
 		return "🟡 Warming up — collecting candle data"
 	})
 
-	// Initialize AI Chat (Gemini primary + Groq fallback)
 	geminiChat := chatbot.NewGeminiChat(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
 	if cfg.Groq.APIKey != "" {
 		geminiChat.SetGroqFallback(cfg.Groq.APIKey, cfg.Groq.Model)
-		slog.Info("Groq fallback configured", "model", cfg.Groq.Model)
 	}
 	chatHandler.SetGeminiChat(geminiChat)
-	slog.Info("AI Chat initialized", "primary", cfg.Gemini.Model, "fallback", cfg.Groq.Model)
 
-	// ── Start HTTP server for chat ────────────────────────────────────
+	// Set chatHandler on pipeline (was nil during construction)
+	p.SetChatHandler(chatHandler)
+
+	// ── HTTP Server + GraphQL ─────────────────────────────────────────
 	mux := http.NewServeMux()
 	mux.Handle("/chat", chatHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -235,21 +206,28 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	httpServer := &http.Server{
-		Addr:    ":8080",
-		Handler: mux,
+	gqlResolver := &graph.Resolver{
+		Store:        store,
+		KBStore:      kbStore,
+		MarketAgent:  marketAgent,
+		MetaObserver: metaObserver,
+		PubSub:       gqlPubSub,
+		Pairs:        cfg.Pairs,
+		Timeframes:   cfg.Scheduler.Timeframes,
 	}
+	mux.Handle("/graphql", graph.NewHandler(gqlResolver))
 
+	httpServer := &http.Server{Addr: ":8080", Handler: mux}
 	go func() {
-		slog.Info("HTTP server starting", "addr", ":8080")
+		slog.Info("HTTP server starting", "addr", ":8080", "endpoints", []string{"/graphql", "/chat", "/health"})
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server error", "error", err)
 		}
 	}()
 
-	// ── Pipeline loop (concurrent execution) ──────────────────────────
+	// ── Pipeline Loop ─────────────────────────────────────────────────
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute) // Cek setiap 5 menit (hemat API quota)
+		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 
 		for {
@@ -257,312 +235,26 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				// Process all pairs concurrently
-				var wg sync.WaitGroup
-				for _, pair := range cfg.Pairs {
-					wg.Add(1)
-					go func(pair string) {
-						defer wg.Done()
-						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, chatHandler, store)
-					}(pair)
-				}
-				wg.Wait()
-
-				// Setelah pipeline selesai, cek MetaObserver untuk ExperienceReport
-				reports := metaObserver.Observe()
-				if len(reports) > 0 {
-					slog.Info("🚨 MetaObserver detected degradation", "report_count", len(reports))
-
-					// KnowledgeTransferAgent: proses reports → KnowledgeRules
-					newRules := ktaAgent.Process(ctx, reports)
-					if len(newRules) > 0 {
-						slog.Info("✨ KTA generated new rules",
-							"rule_count", len(newRules),
-						)
-					}
-				}
-
-				// Persist metrics ke Redis
-				metrics := metaObserver.GetMetrics()
-				if err := kbStore.SaveAllMetrics(ctx, metrics); err != nil {
-					slog.Debug("⚠️ Failed to save metrics to Redis", "error", err)
-				}
+				p.RunAll(ctx)
+				p.ProcessMetaObserver(ctx)
 			}
 		}
 	}()
 
-	// ── Evaluator Goroutine — evaluasi sinyal setelah delay ───────────
-	go func() {
-		evalTicker := time.NewTicker(1 * time.Minute) // cek setiap menit apakah ada sinyal ready
-		defer evalTicker.Stop()
+	// ── Evaluator Goroutine ───────────────────────────────────────────
+	go p.StartEvaluator(ctx)
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-evalTicker.C:
-				readySignals := signalStore.GetReadyForEvaluation()
-				if len(readySignals) == 0 {
-					continue
-				}
-
-				for _, sig := range readySignals {
-					correct := evaluateSignal(sig, marketAgent, cfg.Scheduler.Timeframes[0], pipThreshold)
-					metaObserver.RecordOutcome(agents.SignalOutcome{
-						AgentName: "TechnicalAgent", // Evaluasi sebagai technical signal
-						Pair:      sig.Pair,
-						Correct:   correct,
-						Regime:    sig.Regime,
-						Timestamp: time.Now(),
-					})
-
-					slog.Debug("📋 Signal evaluated",
-						"pair", sig.Pair,
-						"signal", sig.Signal,
-						"entry", fmt.Sprintf("%.5f", sig.Entry),
-						"correct", correct,
-						"regime", string(sig.Regime),
-					)
-				}
-			}
-		}
-	}()
-
-	// ── Wait for shutdown signal ──────────────────────────────────────
+	// ── Wait for shutdown ─────────────────────────────────────────────
 	sig := <-sigChan
 	slog.Info("Shutdown signal received", "signal", sig)
 	cancel()
 
-	// Gracefully shutdown HTTP server
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
-	httpServer.Shutdown(shutdownCtx)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		slog.Error("HTTP server shutdown error", "error", err)
+	}
 
-	// Give goroutines time to cleanup
 	time.Sleep(1 * time.Second)
 	slog.Info("🛑 Forex Multi-Agent Bot stopped. Bye!")
-}
-
-// ════════════════════════════════════════════════════════════════════════════════
-// runPipeline — proses satu pair dengan concurrent TechnicalAgent + FundamentalAgent
-// ════════════════════════════════════════════════════════════════════════════════
-
-func runPipeline(
-	ctx context.Context,
-	pair string,
-	cfg *config.Config,
-	marketAgent *agents.MarketDataAgent,
-	regimeAgent *agents.RegimeDetectionAgent,
-	technicalAgent *agents.TechnicalAgent,
-	fundamentalAgent *agents.FundamentalAgent,
-	riskAgent *agents.RiskAgent,
-	decisionAgent *agents.DecisionAgent,
-	whatsAppAgent *agents.WhatsAppAgent,
-	metaObserver *agents.MetaObserverAgent,
-	signalStore *agents.SignalStore,
-	evalDelay time.Duration,
-	chatHandler *chatbot.Handler,
-	store *storage.Store,
-) {
-	// Agent 1: Check if MarketDataAgent has enough data
-	output := marketAgent.Run(ctx, agents.AgentInput{Pair: pair})
-	if !output.Success {
-		bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
-		slog.Debug("⏳ MarketDataAgent collecting...",
-			"pair", pair,
-			"buffer", fmt.Sprintf("%d/%d", bufSize, agents.MinCandlesRequired),
-		)
-		return
-	}
-
-	candles := marketAgent.GetCandles(pair, cfg.Scheduler.Timeframes[0])
-
-	// Persist candles to TimescaleDB (non-blocking, best-effort)
-	if store != nil {
-		go func() {
-			if err := store.InsertCandles(ctx, candles); err != nil {
-				slog.Debug("⚠️ Failed to persist candles", "pair", pair, "error", err)
-			}
-		}()
-	}
-
-	// ── Regime Detection: klasifikasi kondisi pasar ───────────────────
-	regimeCtx := regimeAgent.Detect(ctx, pair, candles)
-	slog.Debug("🔍 RegimeDetection completed",
-		"pair", pair,
-		"regime", string(regimeCtx.Regime),
-		"adx", fmt.Sprintf("%.2f", regimeCtx.ADX),
-		"atr", fmt.Sprintf("%.6f", regimeCtx.ATR),
-		"volatility", fmt.Sprintf("%.4f", regimeCtx.Volatility),
-		"trend_strength", fmt.Sprintf("%.2f", regimeCtx.TrendStrength),
-	)
-
-	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
-	var techOutput, fundOutput agents.AgentOutput
-
-	g, gCtx := errgroup.WithContext(ctx)
-
-	g.Go(func() error {
-		techOutput = technicalAgent.Run(gCtx, agents.AgentInput{
-			Pair:    pair,
-			Candles: candles,
-			Regime:  &regimeCtx,
-		})
-		if techOutput.Success && techOutput.Technical != nil {
-			slog.Debug("✅ TechnicalAgent completed",
-				"pair", pair,
-				"signal", techOutput.Technical.Signal,
-				"confidence", fmt.Sprintf("%.2f", techOutput.Technical.Confidence),
-				"tech_score", fmt.Sprintf("%.3f", techOutput.Technical.TechScore),
-			)
-		} else {
-			slog.Debug("⚠️ TechnicalAgent failed", "pair", pair, "error", techOutput.Error)
-		}
-		return nil // non-fatal: pipeline tetap jalan meskipun satu agent gagal
-	})
-
-	g.Go(func() error {
-		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair, Regime: &regimeCtx})
-		if fundOutput.Success && fundOutput.Fundamental != nil {
-			slog.Debug("✅ FundamentalAgent completed",
-				"pair", pair,
-				"sentiment", fundOutput.Fundamental.Sentiment,
-				"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
-				"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
-				"from_cache", fundOutput.Fundamental.FromCache,
-			)
-		} else {
-			slog.Debug("⚠️ FundamentalAgent failed", "pair", pair, "error", fundOutput.Error)
-		}
-		return nil
-	})
-
-	// Wait for both agents to complete
-	_ = g.Wait()
-
-	// ── Agent 4: Risk Management (needs technical signal) ─────────────
-	riskInput := agents.AgentInput{
-		Pair:           pair,
-		Candles:        candles,
-		Technical:      techOutput.Technical,
-		Regime:         &regimeCtx,
-		AccountBalance: cfg.Account.Balance,
-		RiskPercent:    cfg.Account.RiskPercent,
-	}
-	riskOutput := riskAgent.Run(ctx, riskInput)
-	if riskOutput.Success && riskOutput.Risk != nil {
-		slog.Debug("✅ RiskAgent completed",
-			"pair", pair,
-			"lot_size", fmt.Sprintf("%.2f", riskOutput.Risk.LotSize),
-			"sl", fmt.Sprintf("%.5f", riskOutput.Risk.StopLoss),
-			"tp", fmt.Sprintf("%.5f", riskOutput.Risk.TakeProfit),
-		)
-	} else {
-		slog.Debug("⚠️ RiskAgent failed", "pair", pair, "error", riskOutput.Error)
-	}
-
-	// ── Agent 5: Decision (aggregate all) ─────────────────────────────
-	decisionInput := agents.AgentInput{
-		Pair:           pair,
-		Candles:        candles,
-		Technical:      techOutput.Technical,
-		Fundamental:    fundOutput.Fundamental,
-		Risk:           riskOutput.Risk,
-		Regime:         &regimeCtx,
-		AccountBalance: cfg.Account.Balance,
-		RiskPercent:    cfg.Account.RiskPercent,
-	}
-	decisionOutput := decisionAgent.Run(ctx, decisionInput)
-
-	// Log final pipeline result
-	if decisionOutput.Success && decisionOutput.Decision != nil {
-		d := decisionOutput.Decision
-		slog.Info("📊 Pipeline completed",
-			"pair", pair,
-			"signal", d.Signal,
-			"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
-			"risk_level", d.RiskLevel,
-			"regime", d.Regime,
-			"tech_signal", d.TechSignal,
-			"fund_sentiment", d.FundSentiment,
-		)
-
-		// Update chatbot with latest signal
-		chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
-
-		// Persist signal to TimescaleDB
-		if store != nil {
-			if err := store.InsertSignal(ctx, d); err != nil {
-				slog.Debug("⚠️ Failed to persist signal", "pair", pair, "error", err)
-			}
-		}
-
-		if d.Signal != "HOLD" {
-			slog.Info("💰 Trade Signal",
-				"pair", pair,
-				"signal", d.Signal,
-				"entry", fmt.Sprintf("%.5f", d.Entry),
-				"sl", fmt.Sprintf("%.5f", d.StopLoss),
-				"tp", fmt.Sprintf("%.5f", d.TakeProfit),
-				"lot", fmt.Sprintf("%.2f", d.LotSize),
-			)
-
-			// Simpan ke signal store untuk evaluasi nanti oleh MetaObserver
-			signalStore.Add(agents.PendingSignal{
-				Pair:      pair,
-				Signal:    d.Signal,
-				Entry:     d.Entry,
-				Regime:    knowledge.MarketRegime(d.Regime),
-				CreatedAt: time.Now(),
-				EvalAfter: time.Now().Add(evalDelay),
-			})
-		}
-
-		// ── Agent 6: WhatsApp Notification ────────────────────────────
-		waInput := agents.AgentInput{
-			Pair:     pair,
-			Decision: decisionOutput.Decision,
-		}
-		waOutput := whatsAppAgent.Run(ctx, waInput)
-		if !waOutput.Success {
-			slog.Debug("⚠️ WhatsAppAgent failed", "pair", pair, "error", waOutput.Error)
-		}
-	} else {
-		slog.Warn("⚠️ DecisionAgent failed", "pair", pair, "error", decisionOutput.Error)
-	}
-}
-
-// ════════════════════════════════════════════════════════════════════════════════
-// evaluateSignal — cek apakah sinyal benar berdasarkan pergerakan harga aktual
-// ════════════════════════════════════════════════════════════════════════════════
-
-// evaluateSignal membandingkan harga entry dengan harga saat ini.
-// Sinyal dianggap benar jika harga bergerak >= pipThreshold pip ke arah prediksi.
-// Jika data harga tidak tersedia, default ke false (conservative).
-func evaluateSignal(sig agents.PendingSignal, marketAgent *agents.MarketDataAgent, timeframe string, pipThreshold float64) bool {
-	// Ambil harga terbaru dari buffer
-	latest := marketAgent.GetLatestCandle(sig.Pair, timeframe)
-	if latest == nil {
-		return false // tidak ada data, anggap salah (conservative)
-	}
-
-	currentPrice := latest.Close
-	pipSize := 0.0001 // Major pairs
-	if len(sig.Pair) > 3 && (sig.Pair[4:] == "JPY" || sig.Pair[:3] == "JPY") {
-		pipSize = 0.01 // JPY pairs
-	}
-
-	pipsMove := (currentPrice - sig.Entry) / pipSize
-
-	switch sig.Signal {
-	case "BUY":
-		// BUY benar jika harga naik >= pipThreshold
-		return pipsMove >= pipThreshold
-	case "SELL":
-		// SELL benar jika harga turun >= pipThreshold
-		return -pipsMove >= pipThreshold
-	default:
-		return false
-	}
 }

@@ -208,13 +208,6 @@ func (g *GeminiChat) callGemini(ctx context.Context, prompt string) (string, err
 	return answer, nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ════════════════════════════════════════════════════════════════════════
 // Groq Fallback — OpenAI-compatible API
 // ════════════════════════════════════════════════════════════════════════
