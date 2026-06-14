@@ -44,8 +44,14 @@ account:
 # --- AI & ML ---
 gemini:
   api_key: "${GEMINI_API_KEY}"
-  model: "gemini-1.5-flash"
-  timeout_ms: 2000
+  model: "gemini-2.0-flash"
+  timeout_ms: 5000
+
+# Groq sebagai fallback jika Gemini kena rate limit
+groq:
+  api_key: "${GROQ_API_KEY}"
+  model: "llama-3.3-70b-versatile"
+  timeout_ms: 8000
 
 ml_service:
   enabled: false
@@ -53,10 +59,11 @@ ml_service:
   timeout_ms: 500
 
 # --- Signal Thresholds (Decision Agent) ---
+# buy_threshold diturunkan ke 0.60 agar mock data bisa trigger BUY untuk testing
 signal:
-  buy_threshold: 0.65
+  buy_threshold: 0.60
   sell_threshold: 0.35
-  min_confidence_to_alert: 0.60
+  min_confidence_to_alert: 0.55
   weights:
     technical: 0.60
     fundamental: 0.40
@@ -67,14 +74,15 @@ timescaledb:
   dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
 
 redis:
-  address: "localhost:6379"
+  address: "redis:6379"
   password: "${REDIS_PASSWORD}"
-  sentiment_ttl_minutes: 5
+  sentiment_ttl_minutes: 30
   price_ttl_seconds: 10
 
 # --- WhatsApp ---
+# service_url: gunakan "http://whatsapp:3001" jika di Docker, "http://localhost:3001" jika lokal
 whatsapp:
-  service_url: "http://localhost:3001"
+  service_url: "http://whatsapp:3001"
   target_phone: "${WA_TARGET_PHONE}"
-  min_confidence_to_alert: 0.60
+  min_confidence_to_alert: 0.55
   rate_limit_seconds: 180

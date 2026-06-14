@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/dhnnnn/forex-agent/internal/agents"
+	"github.com/dhnnnn/forex-agent/internal/chatbot"
 	"github.com/dhnnnn/forex-agent/internal/config"
 	"github.com/dhnnnn/forex-agent/internal/feed"
 	"github.com/dhnnnn/forex-agent/internal/sentiment"
@@ -109,13 +111,69 @@ func main() {
 	decisionAgent := agents.NewDecisionAgent(signalCfg, nil)
 	slog.Info("Agent initialized", "agent", decisionAgent.Name())
 
+	// ── Initialize Agent 6: WhatsAppAgent ─────────────────────────────
+	whatsAppAgent := agents.NewWhatsAppAgent(agents.WhatsAppConfig{
+		ServiceURL:           cfg.WhatsApp.ServiceURL,
+		TargetPhone:          cfg.WhatsApp.TargetPhone,
+		MinConfidenceToAlert: cfg.WhatsApp.MinConfidenceToAlert,
+		RateLimitSeconds:     cfg.WhatsApp.RateLimitSeconds,
+	})
+	slog.Info("Agent initialized", "agent", whatsAppAgent.Name(),
+		"service_url", cfg.WhatsApp.ServiceURL,
+		"rate_limit", fmt.Sprintf("%ds", cfg.WhatsApp.RateLimitSeconds),
+	)
+
 	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
 
+	// ── Initialize ChatBot Handler ────────────────────────────────────
+	chatHandler := chatbot.NewHandler()
+	chatHandler.UpdateFromConfig(cfg.Account.Balance, cfg.Account.RiskPercent)
+	chatHandler.SetPairs(cfg.Pairs)
+	chatHandler.SetStatusFunc(func() string {
+		// Cek apakah ada pair yang sudah ready
+		for _, pair := range cfg.Pairs {
+			bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
+			if bufSize >= agents.MinCandlesRequired {
+				return "🟢 Running — pipeline active"
+			}
+		}
+		return "🟡 Warming up — collecting candle data"
+	})
+
+	// Initialize AI Chat (Gemini primary + Groq fallback)
+	geminiChat := chatbot.NewGeminiChat(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
+	if cfg.Groq.APIKey != "" {
+		geminiChat.SetGroqFallback(cfg.Groq.APIKey, cfg.Groq.Model)
+		slog.Info("Groq fallback configured", "model", cfg.Groq.Model)
+	}
+	chatHandler.SetGeminiChat(geminiChat)
+	slog.Info("AI Chat initialized", "primary", cfg.Gemini.Model, "fallback", cfg.Groq.Model)
+
+	// ── Start HTTP server for chat ────────────────────────────────────
+	mux := http.NewServeMux()
+	mux.Handle("/chat", chatHandler)
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok"}`))
+	})
+
+	httpServer := &http.Server{
+		Addr:    ":8080",
+		Handler: mux,
+	}
+
+	go func() {
+		slog.Info("HTTP server starting", "addr", ":8080")
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.Error("HTTP server error", "error", err)
+		}
+	}()
+
 	// ── Pipeline loop (check readiness every 10 seconds) ──────────────
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(5 * time.Minute) // Cek setiap 5 menit (hemat API quota)
 		defer ticker.Stop()
 
 		for {
@@ -219,6 +277,9 @@ func main() {
 							"tech_signal", d.TechSignal,
 							"fund_sentiment", d.FundSentiment,
 						)
+
+						// Update chatbot with latest signal
+						chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
 						if d.Signal != "HOLD" {
 							slog.Info("💰 Trade Signal",
 								"pair", pair,
@@ -227,6 +288,19 @@ func main() {
 								"sl", fmt.Sprintf("%.5f", d.StopLoss),
 								"tp", fmt.Sprintf("%.5f", d.TakeProfit),
 								"lot", fmt.Sprintf("%.2f", d.LotSize),
+							)
+						}
+
+						// Agent 6: WhatsApp Notification
+						waInput := agents.AgentInput{
+							Pair:     pair,
+							Decision: decisionOutput.Decision,
+						}
+						waOutput := whatsAppAgent.Run(ctx, waInput)
+						if !waOutput.Success {
+							slog.Debug("⚠️ WhatsAppAgent failed",
+								"pair", pair,
+								"error", waOutput.Error,
 							)
 						}
 					} else {
@@ -244,6 +318,11 @@ func main() {
 	sig := <-sigChan
 	slog.Info("Shutdown signal received", "signal", sig)
 	cancel()
+
+	// Gracefully shutdown HTTP server
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 
 	// Give goroutines time to cleanup
 	time.Sleep(1 * time.Second)
