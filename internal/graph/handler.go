@@ -3,13 +3,10 @@ package graph
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
-	"github.com/dhnnnn/forexAnalysis/internal/graph/model"
 	"github.com/gorilla/websocket"
 )
 
@@ -393,8 +390,3 @@ func extractIntVar(vars map[string]interface{}, key string, defaultVal int) int 
 	}
 	return defaultVal
 }
-
-// Suppress unused import warnings
-var _ = fmt.Sprintf
-var _ = time.Now
-var _ = model.Candle{}
