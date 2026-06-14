@@ -16,6 +16,7 @@ import (
 	"github.com/dhnnnn/forex-agent/internal/config"
 	"github.com/dhnnnn/forex-agent/internal/feed"
 	"github.com/dhnnnn/forex-agent/internal/sentiment"
+	"github.com/dhnnnn/forex-agent/internal/storage"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
@@ -45,6 +46,15 @@ func main() {
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// ── Initialize Storage (TimescaleDB) ──────────────────────────────
+	store, err := storage.New(ctx, cfg.TimescaleDB.DSN)
+	if err != nil {
+		slog.Warn("⚠️ TimescaleDB not available — signals won't be persisted", "error", err)
+		store = nil
+	} else {
+		defer store.Close()
+	}
 
 	// ── Initialize Feed Layer ─────────────────────────────────────────
 	wsFeed := feed.NewWebSocketFeed(
@@ -190,7 +200,7 @@ func main() {
 					go func(pair string) {
 						defer wg.Done()
 						runPipeline(ctx, pair, cfg, marketAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, chatHandler)
+							riskAgent, decisionAgent, whatsAppAgent, chatHandler, store)
 					}(pair)
 				}
 				wg.Wait()
@@ -228,6 +238,7 @@ func runPipeline(
 	decisionAgent *agents.DecisionAgent,
 	whatsAppAgent *agents.WhatsAppAgent,
 	chatHandler *chatbot.Handler,
+	store *storage.Store,
 ) {
 	// Agent 1: Check if MarketDataAgent has enough data
 	output := marketAgent.Run(ctx, agents.AgentInput{Pair: pair})
@@ -241,6 +252,15 @@ func runPipeline(
 	}
 
 	candles := marketAgent.GetCandles(pair, cfg.Scheduler.Timeframes[0])
+
+	// Persist candles to TimescaleDB (non-blocking, best-effort)
+	if store != nil {
+		go func() {
+			if err := store.InsertCandles(ctx, candles); err != nil {
+				slog.Debug("⚠️ Failed to persist candles", "pair", pair, "error", err)
+			}
+		}()
+	}
 
 	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
 	var techOutput, fundOutput agents.AgentOutput
@@ -330,6 +350,14 @@ func runPipeline(
 
 		// Update chatbot with latest signal
 		chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
+
+		// Persist signal to TimescaleDB
+		if store != nil {
+			if err := store.InsertSignal(ctx, d); err != nil {
+				slog.Debug("⚠️ Failed to persist signal", "pair", pair, "error", err)
+			}
+		}
+
 		if d.Signal != "HOLD" {
 			slog.Info("💰 Trade Signal",
 				"pair", pair,
