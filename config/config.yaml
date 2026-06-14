@@ -92,7 +92,7 @@ knowledge_transfer:
 
 # --- Storage ---
 timescaledb:
-  dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
+  dsn: "postgres://forex_user:${DB_PASSWORD}@timescaledb:5432/forex_db?sslmode=disable"
 
 redis:
   address: "redis:6379"

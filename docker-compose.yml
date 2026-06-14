@@ -84,6 +84,26 @@ services:
       retries: 3
     restart: unless-stopped
 
+  # ════════════════════════════════════════
+  # Frontend — React + Vite (Nginx)
+  # ════════════════════════════════════════
+  frontend:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: forex-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      forex-agent:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
 volumes:
   timescale_data:
   wa_session:

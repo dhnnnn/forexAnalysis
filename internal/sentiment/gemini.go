@@ -21,6 +21,10 @@ type GeminiClient struct {
 	model   string
 	timeout time.Duration
 	client  *http.Client
+
+	// Groq fallback
+	groqAPIKey string
+	groqModel  string
 }
 
 // geminiRequest represents the request body for the Gemini API.
@@ -67,17 +71,122 @@ func NewGeminiClient(apiKey, model string, timeout time.Duration) *GeminiClient 
 	}
 }
 
+// SetGroqFallback configures the Groq API key and model for fallback execution.
+func (g *GeminiClient) SetGroqFallback(apiKey, model string) {
+	g.groqAPIKey = apiKey
+	g.groqModel = model
+}
+
 // AnalyzeSentiment sends the headlines to the Gemini API and returns a SentimentResult.
 // On any error (timeout, invalid JSON, missing fields, etc.), it returns a neutral fallback.
 func (g *GeminiClient) AnalyzeSentiment(ctx context.Context, pair string, headlines []string) SentimentResult {
 	prompt := BuildPrompt(pair, headlines)
 
 	result, err := g.callGemini(ctx, prompt)
-	if err != nil {
-		return neutralFallback(err.Error())
+	if err == nil {
+		return result
 	}
 
-	return result
+	// Fallback to Groq
+	if g.groqAPIKey != "" {
+		gResult, gErr := g.callGroq(ctx, prompt)
+		if gErr == nil {
+			return gResult
+		}
+		return neutralFallback("Gemini & Groq unavailable: " + gErr.Error())
+	}
+
+	return neutralFallback(err.Error())
+}
+
+// callGroq calls the Groq API (OpenAI-compatible) and parses the response.
+func (g *GeminiClient) callGroq(ctx context.Context, prompt string) (SentimentResult, error) {
+	url := "https://api.groq.com/openai/v1/chat/completions"
+
+	type groqMessage struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}
+
+	type groqRequest struct {
+		Model    string        `json:"model"`
+		Messages []groqMessage `json:"messages"`
+	}
+
+	reqBody := groqRequest{
+		Model: g.groqModel,
+		Messages: []groqMessage{
+			{Role: "user", Content: prompt},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return SentimentResult{}, fmt.Errorf("marshal request: %w", err)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(timeoutCtx, http.MethodPost, url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return SentimentResult{}, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+g.groqAPIKey)
+
+	resp, err := g.client.Do(req)
+	if err != nil {
+		return SentimentResult{}, fmt.Errorf("Groq API call failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return SentimentResult{}, fmt.Errorf("Groq API error %d: %s", resp.StatusCode, string(body[:min(len(body), 200)]))
+	}
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return SentimentResult{}, fmt.Errorf("read response: %w", err)
+	}
+
+	type groqResponse struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+
+	var groqResp groqResponse
+	if err := json.Unmarshal(respBody, &groqResp); err != nil {
+		return SentimentResult{}, fmt.Errorf("parse response: %w", err)
+	}
+
+	if len(groqResp.Choices) == 0 {
+		return SentimentResult{}, fmt.Errorf("empty response from Groq")
+	}
+
+	text := cleanJSONText(groqResp.Choices[0].Message.Content)
+
+	var parsed sentimentJSON
+	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+		return SentimentResult{}, fmt.Errorf("invalid Groq JSON response")
+	}
+
+	sentimentVal := strings.ToLower(strings.TrimSpace(parsed.Sentiment))
+	if sentimentVal != "bullish" && sentimentVal != "bearish" && sentimentVal != "neutral" {
+		sentimentVal = "neutral"
+	}
+
+	confidence := clampConfidence(parsed.Confidence)
+
+	return SentimentResult{
+		Sentiment:  sentimentVal,
+		Confidence: confidence,
+		Reason:     parsed.Reason,
+	}, nil
 }
 
 // BuildPrompt constructs the Gemini prompt from a currency pair and list of headlines.

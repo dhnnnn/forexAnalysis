@@ -154,7 +154,47 @@ func (r *Resolver) QueryPairs(ctx context.Context) ([]string, error) {
 	return r.Pairs, nil
 }
 
-// ConnectionStatus returns current connection status.
 func (r *Resolver) ConnectionStatus(ctx context.Context) (string, error) {
 	return "connected", nil
+}
+
+func (r *Resolver) PerformanceLogs(ctx context.Context, agent *string, pair *string, limit *int) ([]*model.PerformanceLog, error) {
+	return []*model.PerformanceLog{}, nil
+}
+
+func (r *Resolver) ExpiredRules(ctx context.Context, limit *int) ([]*model.KnowledgeRule, error) {
+	return []*model.KnowledgeRule{}, nil
+}
+
+func (r *Resolver) AdaptiveWeights(ctx context.Context, pair string) (*model.AdaptiveWeights, error) {
+	return &model.AdaptiveWeights{
+		TechWeight:   0.50,
+		FundWeight:   0.50,
+		RulesApplied: 0,
+		Regime:       "UNKNOWN",
+	}, nil
+}
+
+func (r *Resolver) CurrentRegime(ctx context.Context, pair string) (*model.RegimeContext, error) {
+	return &model.RegimeContext{
+		Pair:          pair,
+		Regime:        "UNKNOWN",
+		ADX:           0.0,
+		ATR:           0.0,
+		Volatility:    0.0,
+		TrendStrength: 0.0,
+		DetectedAt:    time.Now().Format(time.RFC3339),
+	}, nil
+}
+
+func (r *Resolver) RegimeHistory(ctx context.Context, pair string, limit *int) ([]*model.RegimeContext, error) {
+	return []*model.RegimeContext{}, nil
+}
+
+func (r *Resolver) RegimeChanges(ctx context.Context, pair string, limit *int) ([]*model.RegimeChange, error) {
+	return []*model.RegimeChange{}, nil
+}
+
+func (r *Resolver) Logs(ctx context.Context, level *string, limit *int) ([]*model.SystemLog, error) {
+	return []*model.SystemLog{}, nil
 }
