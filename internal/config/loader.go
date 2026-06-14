@@ -9,22 +9,23 @@ import (
 
 // Config is the root configuration structure matching config/config.yaml.
 type Config struct {
-	Oanda          OandaConfig           `yaml:"oanda"`
-	TwelveData     TwelveDataConfig      `yaml:"twelve_data"`
-	AlphaVantage   AlphaVantageConfig    `yaml:"alpha_vantage"`
-	RSSFeeds       RSSFeedsConfig        `yaml:"rss_feeds"`
-	Pairs          []string              `yaml:"pairs"`
-	Scheduler      SchedulerConfig       `yaml:"scheduler"`
-	Account        AccountConfig         `yaml:"account"`
-	Gemini         GeminiConfig          `yaml:"gemini"`
-	Groq           GroqConfig            `yaml:"groq"`
-	MLService      MLServiceConfig       `yaml:"ml_service"`
-	Signal         SignalConfig           `yaml:"signal"`
-	RegimeDetect   RegimeDetectionConfig `yaml:"regime_detection"`
-	MetaObserver   MetaObserverConfig    `yaml:"meta_observer"`
-	TimescaleDB    TimescaleDBConfig     `yaml:"timescaledb"`
-	Redis          RedisConfig           `yaml:"redis"`
-	WhatsApp       WhatsAppConfig        `yaml:"whatsapp"`
+	Oanda             OandaConfig             `yaml:"oanda"`
+	TwelveData        TwelveDataConfig        `yaml:"twelve_data"`
+	AlphaVantage      AlphaVantageConfig      `yaml:"alpha_vantage"`
+	RSSFeeds          RSSFeedsConfig          `yaml:"rss_feeds"`
+	Pairs             []string                `yaml:"pairs"`
+	Scheduler         SchedulerConfig         `yaml:"scheduler"`
+	Account           AccountConfig           `yaml:"account"`
+	Gemini            GeminiConfig            `yaml:"gemini"`
+	Groq              GroqConfig              `yaml:"groq"`
+	MLService         MLServiceConfig         `yaml:"ml_service"`
+	Signal            SignalConfig            `yaml:"signal"`
+	RegimeDetect      RegimeDetectionConfig   `yaml:"regime_detection"`
+	MetaObserver      MetaObserverConfig      `yaml:"meta_observer"`
+	KnowledgeTransfer KnowledgeTransferConfig `yaml:"knowledge_transfer"`
+	TimescaleDB       TimescaleDBConfig       `yaml:"timescaledb"`
+	Redis             RedisConfig             `yaml:"redis"`
+	WhatsApp          WhatsAppConfig          `yaml:"whatsapp"`
 }
 
 type OandaConfig struct {
@@ -102,6 +103,12 @@ type MetaObserverConfig struct {
 	LossStreakTrigger int    `yaml:"loss_streak_trigger"`
 	EvalDelayMinutes int     `yaml:"eval_delay_minutes"`
 	PipThreshold     float64 `yaml:"pip_threshold"`
+}
+
+type KnowledgeTransferConfig struct {
+	RuleTTLHours  int     `yaml:"rule_ttl_hours"`
+	MinConfidence float64 `yaml:"min_confidence"`
+	TimeoutMs     int     `yaml:"timeout_ms"`
 }
 
 type TimescaleDBConfig struct {
