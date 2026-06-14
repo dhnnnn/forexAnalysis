@@ -15,6 +15,7 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/chatbot"
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 	"github.com/dhnnnn/forexAnalysis/internal/storage"
 	"github.com/redis/go-redis/v9"
@@ -144,6 +145,33 @@ func main() {
 		"rate_limit", fmt.Sprintf("%ds", cfg.WhatsApp.RateLimitSeconds),
 	)
 
+	// ── Initialize MetaObserverAgent ──────────────────────────────────
+	metaObserver := agents.NewMetaObserverAgentWithConfig(agents.MetaObserverConfig{
+		RollingWindow:     cfg.MetaObserver.RollingWindow,
+		DropThreshold:     cfg.MetaObserver.DropThreshold,
+		LossStreakTrigger: cfg.MetaObserver.LossStreakTrigger,
+	})
+	metaObserver.RegisterAgent("TechnicalAgent")
+	metaObserver.RegisterAgent("FundamentalAgent")
+	slog.Info("Agent initialized", "agent", metaObserver.Name(),
+		"rolling_window", cfg.MetaObserver.RollingWindow,
+		"drop_threshold", cfg.MetaObserver.DropThreshold,
+		"loss_streak_trigger", cfg.MetaObserver.LossStreakTrigger,
+	)
+
+	// ── Initialize Knowledge Store (Redis) ────────────────────────────
+	kbStore := knowledge.NewStore(redisClient)
+	slog.Info("Knowledge Store initialized (Redis)")
+
+	// ── Initialize Signal Store (untuk evaluator) ─────────────────────
+	signalStore := agents.NewSignalStore()
+	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
+	pipThreshold := cfg.MetaObserver.PipThreshold
+	slog.Info("Signal evaluator configured",
+		"eval_delay", evalDelay.String(),
+		"pip_threshold", pipThreshold,
+	)
+
 	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
@@ -209,10 +237,60 @@ func main() {
 					go func(pair string) {
 						defer wg.Done()
 						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, chatHandler, store)
+							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, chatHandler, store)
 					}(pair)
 				}
 				wg.Wait()
+
+				// Setelah pipeline selesai, cek MetaObserver untuk ExperienceReport
+				reports := metaObserver.Observe()
+				if len(reports) > 0 {
+					slog.Info("🚨 MetaObserver detected degradation", "report_count", len(reports))
+					// TODO: Phase 4 — pass reports ke KnowledgeTransferAgent
+				}
+
+				// Persist metrics ke Redis
+				metrics := metaObserver.GetMetrics()
+				if err := kbStore.SaveAllMetrics(ctx, metrics); err != nil {
+					slog.Debug("⚠️ Failed to save metrics to Redis", "error", err)
+				}
+			}
+		}
+	}()
+
+	// ── Evaluator Goroutine — evaluasi sinyal setelah delay ───────────
+	go func() {
+		evalTicker := time.NewTicker(1 * time.Minute) // cek setiap menit apakah ada sinyal ready
+		defer evalTicker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-evalTicker.C:
+				readySignals := signalStore.GetReadyForEvaluation()
+				if len(readySignals) == 0 {
+					continue
+				}
+
+				for _, sig := range readySignals {
+					correct := evaluateSignal(sig, marketAgent, cfg.Scheduler.Timeframes[0], pipThreshold)
+					metaObserver.RecordOutcome(agents.SignalOutcome{
+						AgentName: "TechnicalAgent", // Evaluasi sebagai technical signal
+						Pair:      sig.Pair,
+						Correct:   correct,
+						Regime:    sig.Regime,
+						Timestamp: time.Now(),
+					})
+
+					slog.Debug("📋 Signal evaluated",
+						"pair", sig.Pair,
+						"signal", sig.Signal,
+						"entry", fmt.Sprintf("%.5f", sig.Entry),
+						"correct", correct,
+						"regime", string(sig.Regime),
+					)
+				}
 			}
 		}
 	}()
@@ -247,6 +325,9 @@ func runPipeline(
 	riskAgent *agents.RiskAgent,
 	decisionAgent *agents.DecisionAgent,
 	whatsAppAgent *agents.WhatsAppAgent,
+	metaObserver *agents.MetaObserverAgent,
+	signalStore *agents.SignalStore,
+	evalDelay time.Duration,
 	chatHandler *chatbot.Handler,
 	store *storage.Store,
 ) {
@@ -392,6 +473,16 @@ func runPipeline(
 				"tp", fmt.Sprintf("%.5f", d.TakeProfit),
 				"lot", fmt.Sprintf("%.2f", d.LotSize),
 			)
+
+			// Simpan ke signal store untuk evaluasi nanti oleh MetaObserver
+			signalStore.Add(agents.PendingSignal{
+				Pair:      pair,
+				Signal:    d.Signal,
+				Entry:     d.Entry,
+				Regime:    knowledge.MarketRegime(d.Regime),
+				CreatedAt: time.Now(),
+				EvalAfter: time.Now().Add(evalDelay),
+			})
 		}
 
 		// ── Agent 6: WhatsApp Notification ────────────────────────────
@@ -405,5 +496,39 @@ func runPipeline(
 		}
 	} else {
 		slog.Warn("⚠️ DecisionAgent failed", "pair", pair, "error", decisionOutput.Error)
+	}
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// evaluateSignal — cek apakah sinyal benar berdasarkan pergerakan harga aktual
+// ════════════════════════════════════════════════════════════════════════════════
+
+// evaluateSignal membandingkan harga entry dengan harga saat ini.
+// Sinyal dianggap benar jika harga bergerak >= pipThreshold pip ke arah prediksi.
+// Jika data harga tidak tersedia, default ke false (conservative).
+func evaluateSignal(sig agents.PendingSignal, marketAgent *agents.MarketDataAgent, timeframe string, pipThreshold float64) bool {
+	// Ambil harga terbaru dari buffer
+	latest := marketAgent.GetLatestCandle(sig.Pair, timeframe)
+	if latest == nil {
+		return false // tidak ada data, anggap salah (conservative)
+	}
+
+	currentPrice := latest.Close
+	pipSize := 0.0001 // Major pairs
+	if len(sig.Pair) > 3 && (sig.Pair[4:] == "JPY" || sig.Pair[:3] == "JPY") {
+		pipSize = 0.01 // JPY pairs
+	}
+
+	pipsMove := (currentPrice - sig.Entry) / pipSize
+
+	switch sig.Signal {
+	case "BUY":
+		// BUY benar jika harga naik >= pipThreshold
+		return pipsMove >= pipThreshold
+	case "SELL":
+		// SELL benar jika harga turun >= pipThreshold
+		return -pipsMove >= pipThreshold
+	default:
+		return false
 	}
 }

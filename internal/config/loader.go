@@ -21,6 +21,7 @@ type Config struct {
 	MLService      MLServiceConfig       `yaml:"ml_service"`
 	Signal         SignalConfig           `yaml:"signal"`
 	RegimeDetect   RegimeDetectionConfig `yaml:"regime_detection"`
+	MetaObserver   MetaObserverConfig    `yaml:"meta_observer"`
 	TimescaleDB    TimescaleDBConfig     `yaml:"timescaledb"`
 	Redis          RedisConfig           `yaml:"redis"`
 	WhatsApp       WhatsAppConfig        `yaml:"whatsapp"`
@@ -93,6 +94,14 @@ type RegimeDetectionConfig struct {
 	ATRPeriod    int     `yaml:"atr_period"`
 	ADXThreshold float64 `yaml:"adx_threshold"`
 	VolThreshold float64 `yaml:"vol_threshold"`
+}
+
+type MetaObserverConfig struct {
+	RollingWindow    int     `yaml:"rolling_window"`
+	DropThreshold    float64 `yaml:"drop_threshold"`
+	LossStreakTrigger int    `yaml:"loss_streak_trigger"`
+	EvalDelayMinutes int     `yaml:"eval_delay_minutes"`
+	PipThreshold     float64 `yaml:"pip_threshold"`
 }
 
 type TimescaleDBConfig struct {
