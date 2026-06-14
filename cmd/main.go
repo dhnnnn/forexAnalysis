@@ -172,6 +172,30 @@ func main() {
 		"pip_threshold", pipThreshold,
 	)
 
+	// ── Initialize KnowledgeTransferAgent ─────────────────────────────
+	ktaTimeout := time.Duration(cfg.KnowledgeTransfer.TimeoutMs) * time.Millisecond
+	if ktaTimeout == 0 {
+		ktaTimeout = 10 * time.Second
+	}
+	ktaRuleTTL := time.Duration(cfg.KnowledgeTransfer.RuleTTLHours) * time.Hour
+	if ktaRuleTTL == 0 {
+		ktaRuleTTL = 24 * time.Hour
+	}
+
+	ktaAgent := agents.NewKnowledgeTransferAgent(agents.KTAConfig{
+		GeminiAPIKey:  cfg.Gemini.APIKey,
+		GeminiModel:   cfg.Gemini.Model,
+		GroqAPIKey:    cfg.Groq.APIKey,
+		GroqModel:     cfg.Groq.Model,
+		Timeout:       ktaTimeout,
+		RuleTTL:       ktaRuleTTL,
+		MinConfidence: cfg.KnowledgeTransfer.MinConfidence,
+	}, kbStore)
+	slog.Info("Agent initialized", "agent", ktaAgent.Name(),
+		"rule_ttl", ktaRuleTTL.String(),
+		"min_confidence", cfg.KnowledgeTransfer.MinConfidence,
+	)
+
 	// ── Start collecting data in background ───────────────────────────
 	marketAgent.StartCollecting(ctx)
 	slog.Info("MarketDataAgent: collecting candles in background...")
@@ -246,7 +270,14 @@ func main() {
 				reports := metaObserver.Observe()
 				if len(reports) > 0 {
 					slog.Info("🚨 MetaObserver detected degradation", "report_count", len(reports))
-					// TODO: Phase 4 — pass reports ke KnowledgeTransferAgent
+
+					// KnowledgeTransferAgent: proses reports → KnowledgeRules
+					newRules := ktaAgent.Process(ctx, reports)
+					if len(newRules) > 0 {
+						slog.Info("✨ KTA generated new rules",
+							"rule_count", len(newRules),
+						)
+					}
 				}
 
 				// Persist metrics ke Redis

@@ -84,6 +84,12 @@ meta_observer:
   eval_delay_minutes: 30     # tunggu 30 menit sebelum evaluasi sinyal
   pip_threshold: 15          # sinyal dianggap benar jika harga gerak >= 15 pip
 
+# --- Knowledge Transfer ---
+knowledge_transfer:
+  rule_ttl_hours: 24         # rule expired setelah 24 jam
+  min_confidence: 0.60       # confidence minimum untuk simpan rule
+  timeout_ms: 10000          # timeout LLM call (10 detik)
+
 # --- Storage ---
 timescaledb:
   dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
