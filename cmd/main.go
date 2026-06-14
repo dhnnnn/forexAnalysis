@@ -14,6 +14,7 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
 	"github.com/dhnnnn/forexAnalysis/internal/graph"
+	"github.com/dhnnnn/forexAnalysis/internal/graph/model"
 	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 	"github.com/dhnnnn/forexAnalysis/internal/pipeline"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
@@ -78,6 +79,9 @@ func main() {
 
 	geminiTimeout := time.Duration(cfg.Gemini.TimeoutMs) * time.Millisecond
 	geminiClient := sentiment.NewGeminiClient(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
+	if cfg.Groq.APIKey != "" {
+		geminiClient.SetGroqFallback(cfg.Groq.APIKey, cfg.Groq.Model)
+	}
 	sentimentTTL := time.Duration(cfg.Redis.SentimentTTLMin) * time.Minute
 	sentimentCache := sentiment.NewSentimentCache(redisClient, sentimentTTL)
 	newsFetcher := sentiment.NewNewsFetcher(cfg.AlphaVantage.APIKey, cfg.TwelveData.APIKey, cfg.RSSFeeds.URLs)
@@ -136,6 +140,21 @@ func main() {
 
 	// ── Initialize GraphQL PubSub ─────────────────────────────────────
 	gqlPubSub := graph.NewPubSub()
+
+	// Register callback on MarketDataAgent to publish candles to GraphQL subscribers
+	marketAgent.SetOnCandleIngested(func(c agents.Candle) {
+		gqlPubSub.PublishCandle(c.Pair, &model.Candle{
+			Pair:      c.Pair,
+			Open:      c.Open,
+			High:      c.High,
+			Low:       c.Low,
+			Close:     c.Close,
+			Volume:    c.Volume,
+			Spread:    c.Spread,
+			Timeframe: c.Timeframe,
+			Timestamp: c.Timestamp.Format(time.RFC3339),
+		})
+	})
 
 	// ── Build Pipeline ────────────────────────────────────────────────
 	signalStore := agents.NewSignalStore()
@@ -227,7 +246,12 @@ func main() {
 
 	// ── Pipeline Loop ─────────────────────────────────────────────────
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		// Jalankan evaluasi pipeline pertama kali secara langsung agar halaman awal langsung terisi data
+		slog.Info("Running initial pipeline evaluation...")
+		p.RunAll(ctx)
+		p.ProcessMetaObserver(ctx)
+
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		for {

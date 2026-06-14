@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/gorilla/websocket"
 )
@@ -27,11 +28,26 @@ type Handler struct {
 	upgrader websocket.Upgrader
 }
 
+// safeConn wraps a websocket.Conn with a mutex for concurrent writes.
+// Multiple subscription goroutines write to the same connection.
+type safeConn struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (s *safeConn) WriteJSON(v interface{}) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn.WriteJSON(v)
+}
+
 // NewHandler creates a new GraphQL handler.
 func NewHandler(resolver *Resolver) *Handler {
 	return &Handler{
 		resolver: resolver,
 		upgrader: websocket.Upgrader{
+			// Support graphql-transport-ws subprotocol used by Apollo Client / graphql-ws
+			Subprotocols: []string{"graphql-transport-ws", "graphql-ws"},
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins for development
 			},
@@ -137,6 +153,53 @@ func (h *Handler) executeQuery(ctx context.Context, req graphQLRequest) graphQLR
 		data["activeRules"] = rules
 	}
 
+	if strings.Contains(query, "performanceLogs") {
+		agent := extractStringVarPtr(req.Variables, "agent")
+		pair := extractStringVarPtr(req.Variables, "pair")
+		limit := extractIntVar(req.Variables, "limit", 50)
+		logs, _ := h.resolver.PerformanceLogs(ctx, agent, pair, &limit)
+		data["performanceLogs"] = logs
+	}
+
+	if strings.Contains(query, "expiredRules") {
+		limit := extractIntVar(req.Variables, "limit", 50)
+		rules, _ := h.resolver.ExpiredRules(ctx, &limit)
+		data["expiredRules"] = rules
+	}
+
+	if strings.Contains(query, "adaptiveWeights") {
+		pair := extractStringVar(req.Variables, "pair", "EUR_USD")
+		weights, _ := h.resolver.AdaptiveWeights(ctx, pair)
+		data["adaptiveWeights"] = weights
+	}
+
+	if strings.Contains(query, "currentRegime") {
+		pair := extractStringVar(req.Variables, "pair", "EUR_USD")
+		regime, _ := h.resolver.CurrentRegime(ctx, pair)
+		data["currentRegime"] = regime
+	}
+
+	if strings.Contains(query, "regimeHistory") {
+		pair := extractStringVar(req.Variables, "pair", "EUR_USD")
+		limit := extractIntVar(req.Variables, "limit", 50)
+		history, _ := h.resolver.RegimeHistory(ctx, pair, &limit)
+		data["regimeHistory"] = history
+	}
+
+	if strings.Contains(query, "regimeChanges") {
+		pair := extractStringVar(req.Variables, "pair", "EUR_USD")
+		limit := extractIntVar(req.Variables, "limit", 50)
+		changes, _ := h.resolver.RegimeChanges(ctx, pair, &limit)
+		data["regimeChanges"] = changes
+	}
+
+	if strings.Contains(query, "logs") && !strings.Contains(query, "logAdded") {
+		level := extractStringVarPtr(req.Variables, "level")
+		limit := extractIntVar(req.Variables, "limit", 100)
+		logs, _ := h.resolver.Logs(ctx, level, &limit)
+		data["logs"] = logs
+	}
+
 	if strings.Contains(query, "pairs") && !strings.Contains(query, "pair:") {
 		pairs, _ := h.resolver.QueryPairs(ctx)
 		data["pairs"] = pairs
@@ -155,23 +218,28 @@ func (h *Handler) executeQuery(ctx context.Context, req graphQLRequest) graphQLR
 // ════════════════════════════════════════════════════════════════════════
 
 func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := h.upgrader.Upgrade(w, r, nil)
+	rawConn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)
 		return
 	}
-	defer conn.Close()
+	defer rawConn.Close()
 
-	slog.Info("GraphQL WebSocket client connected", "remote", r.RemoteAddr)
+	// Wrap with mutex so subscription goroutines can write concurrently
+	conn := &safeConn{conn: rawConn}
+
+	slog.Info("GraphQL WebSocket client connected",
+		"remote", r.RemoteAddr,
+		"subprotocol", rawConn.Subprotocol())
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
 	// Handle graphql-ws protocol messages
 	for {
-		_, msg, err := conn.ReadMessage()
+		_, msg, err := rawConn.ReadMessage()
 		if err != nil {
-			slog.Debug("WebSocket read error", "error", err)
+			slog.Debug("WebSocket client disconnected", "error", err)
 			return
 		}
 
@@ -182,15 +250,23 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch wsMsg.Type {
 		case "connection_init":
-			// Acknowledge connection
+			// Acknowledge connection (graphql-transport-ws spec)
 			conn.WriteJSON(map[string]string{"type": "connection_ack"})
 
+		case "ping":
+			// graphql-ws sends periodic pings — MUST respond with pong
+			// or the client will close the connection with code 1006
+			conn.WriteJSON(map[string]string{"type": "pong"})
+
+		case "pong":
+			// Client responded to our ping — no-op
+
 		case "subscribe":
-			// Start subscription
+			// Start subscription in background goroutine
 			go h.handleSubscription(ctx, conn, wsMsg)
 
 		case "complete":
-			// Client unsubscribed
+			// Client unsubscribed a specific operation
 			slog.Debug("Client unsubscribed", "id", wsMsg.ID)
 		}
 	}
@@ -207,7 +283,7 @@ type subscribePayload struct {
 	Variables map[string]interface{} `json:"variables"`
 }
 
-func (h *Handler) handleSubscription(ctx context.Context, conn *websocket.Conn, msg wsMessage) {
+func (h *Handler) handleSubscription(ctx context.Context, conn *safeConn, msg wsMessage) {
 	var payload subscribePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		return
@@ -241,7 +317,7 @@ func (h *Handler) handleSubscription(ctx context.Context, conn *websocket.Conn, 
 	}
 }
 
-func (h *Handler) streamCandles(ctx context.Context, conn *websocket.Conn, id, pair string) {
+func (h *Handler) streamCandles(ctx context.Context, conn *safeConn, id, pair string) {
 	ch, _ := h.resolver.CandleUpdated(ctx, pair)
 	for {
 		select {
@@ -256,7 +332,7 @@ func (h *Handler) streamCandles(ctx context.Context, conn *websocket.Conn, id, p
 	}
 }
 
-func (h *Handler) streamAgentOutput(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamAgentOutput(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.AgentOutput(ctx, nil)
 	for {
 		select {
@@ -271,7 +347,7 @@ func (h *Handler) streamAgentOutput(ctx context.Context, conn *websocket.Conn, i
 	}
 }
 
-func (h *Handler) streamSignals(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamSignals(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.SignalGenerated(ctx, nil)
 	for {
 		select {
@@ -286,7 +362,7 @@ func (h *Handler) streamSignals(ctx context.Context, conn *websocket.Conn, id st
 	}
 }
 
-func (h *Handler) streamRegime(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamRegime(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.RegimeChanged(ctx, nil)
 	for {
 		select {
@@ -301,7 +377,7 @@ func (h *Handler) streamRegime(ctx context.Context, conn *websocket.Conn, id str
 	}
 }
 
-func (h *Handler) streamRules(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamRules(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.RuleCreated(ctx)
 	for {
 		select {
@@ -316,7 +392,7 @@ func (h *Handler) streamRules(ctx context.Context, conn *websocket.Conn, id stri
 	}
 }
 
-func (h *Handler) streamLogs(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamLogs(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.LogAdded(ctx, nil)
 	for {
 		select {
@@ -331,7 +407,7 @@ func (h *Handler) streamLogs(ctx context.Context, conn *websocket.Conn, id strin
 	}
 }
 
-func (h *Handler) streamPipelineEvents(ctx context.Context, conn *websocket.Conn, id string) {
+func (h *Handler) streamPipelineEvents(ctx context.Context, conn *safeConn, id string) {
 	ch, _ := h.resolver.PipelineEventSub(ctx, nil)
 	for {
 		select {
@@ -346,7 +422,7 @@ func (h *Handler) streamPipelineEvents(ctx context.Context, conn *websocket.Conn
 	}
 }
 
-func (h *Handler) sendSubscriptionData(conn *websocket.Conn, id string, data interface{}) {
+func (h *Handler) sendSubscriptionData(conn *safeConn, id string, data interface{}) {
 	resp := map[string]interface{}{
 		"id":      id,
 		"type":    "next",
