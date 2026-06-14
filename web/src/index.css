@@ -1,0 +1,174 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  html, body, #root {
+    height: 100%;
+    width: 100%;
+    overflow: hidden;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #0d1117;
+    color: #e6edf3;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #161b22;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #30363d;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #484f58;
+  }
+}
+
+@layer components {
+  /* Panel base */
+  .panel {
+    @apply bg-bg-secondary border border-border-subtle rounded-lg;
+  }
+
+  /* Signal pill */
+  .signal-pill {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-bold font-mono tracking-wider;
+  }
+
+  .signal-pill-buy {
+    @apply signal-pill;
+    background: rgba(46,160,67,0.2);
+    color: #2ea043;
+    border: 1px solid rgba(46,160,67,0.4);
+  }
+  .signal-pill-sell {
+    @apply signal-pill;
+    background: rgba(248,81,73,0.2);
+    color: #f85149;
+    border: 1px solid rgba(248,81,73,0.4);
+  }
+  .signal-pill-hold {
+    @apply signal-pill;
+    background: rgba(210,153,34,0.2);
+    color: #d29922;
+    border: 1px solid rgba(210,153,34,0.4);
+  }
+
+  /* Agent card */
+  .agent-card {
+    @apply panel p-3 transition-all duration-150 hover:border-[#484f58] cursor-pointer;
+    animation: fadeInUp 0.3s ease-out;
+  }
+
+  /* Tab button */
+  .tab-btn {
+    @apply px-3 py-1.5 text-xs font-medium rounded transition-all duration-150 text-text-secondary hover:text-text-primary;
+  }
+  .tab-btn-active {
+    @apply tab-btn bg-bg-elevated text-text-primary;
+  }
+
+  /* Data table */
+  .data-table {
+    @apply w-full text-xs;
+  }
+  .data-table th {
+    @apply text-text-muted font-medium py-2 px-3 text-left border-b border-border-subtle;
+  }
+  .data-table td {
+    @apply py-1.5 px-3 border-b border-[#21262d] font-mono;
+  }
+  .data-table tr:hover td {
+    @apply bg-bg-tertiary;
+  }
+
+  /* Confidence bar */
+  .conf-bar-track {
+    @apply h-1.5 rounded-full overflow-hidden;
+    background: #21262d;
+  }
+  .conf-bar-fill {
+    @apply h-full rounded-full transition-all duration-300;
+  }
+
+  /* Status dot */
+  .status-dot {
+    @apply w-2 h-2 rounded-full inline-block;
+  }
+
+  /* Glowing pulse for connected state */
+  .dot-connected {
+    @apply status-dot bg-buy-green;
+    box-shadow: 0 0 6px rgba(46,160,67,0.6);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  .dot-reconnecting {
+    @apply status-dot bg-hold-amber;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .dot-disconnected {
+    @apply status-dot bg-sell-red;
+  }
+}
+
+@layer utilities {
+  .font-mono { font-family: 'JetBrains Mono', monospace; }
+  .text-gradient {
+    background: linear-gradient(135deg, #58a6ff, #bc8cff);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+}
+
+/* Chart container */
+.chart-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+.chart-container canvas {
+  border-radius: 0;
+}
+
+/* Resize handle */
+.resize-handle {
+  height: 4px;
+  background: #30363d;
+  cursor: ns-resize;
+  position: relative;
+  transition: background 150ms;
+  flex-shrink: 0;
+}
+.resize-handle:hover,
+.resize-handle:active {
+  background: #58a6ff;
+}
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 32px;
+  height: 2px;
+  background: currentColor;
+  border-radius: 1px;
+  opacity: 0.5;
+}
