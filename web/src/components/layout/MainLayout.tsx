@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useSubscription } from '@apollo/client'
 import { PIPELINE_EVENT } from '../../graphql/subscriptions'
+import { wsClient } from '../../graphql/apolloClient'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { Header } from './Header'
 import { StatusBar } from './StatusBar'
@@ -28,6 +29,14 @@ export function MainLayout() {
     },
     onError: () => setStatus('reconnecting'),
   })
+
+  // Track WebSocket connection status from graphql-ws client
+  useEffect(() => {
+    const unsub = wsClient.on('connected', () => setStatus('connected'))
+    const unsub2 = wsClient.on('closed', () => setStatus('disconnected'))
+    const unsub3 = wsClient.on('connecting', () => setStatus('reconnecting'))
+    return () => { unsub(); unsub2(); unsub3() }
+  }, [setStatus])
 
   return (
     <div className="flex flex-col h-full bg-bg-primary overflow-hidden">

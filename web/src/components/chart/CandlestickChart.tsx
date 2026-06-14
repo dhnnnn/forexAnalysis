@@ -47,6 +47,9 @@ export function CandlestickChart() {
     onData: ({ data }) => {
       const candle = data.data?.candleUpdated as CandleData | undefined
       if (!candle) return
+      // Filter by active timeframe to prevent chart corruption
+      if (candle.timeframe !== timeframe) return
+
       addCandle(candle)
       // Update chart directly
       if (candleRef.current) {
@@ -144,7 +147,7 @@ export function CandlestickChart() {
     const raw = historicalData?.candles as CandleData[] | undefined
     if (!raw || !candleRef.current || !volumeRef.current) return
 
-    setCandles(activePair, raw)
+    setCandles(activePair, timeframe, raw)
 
     const candleData = raw.map((c) => ({
       time:  toUnixTimestamp(c.timestamp) as unknown as import('lightweight-charts').UTCTimestamp,
@@ -162,11 +165,19 @@ export function CandlestickChart() {
 
     candleRef.current.setData(candleData)
     volumeRef.current.setData(volumeData)
-    chartRef.current?.timeScale().fitContent()
-  }, [historicalData, activePair]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    // Zoom to show only the last 30 candles (TradingView-style focus)
+    const timeScale = chartRef.current?.timeScale()
+    if (timeScale && candleData.length > 0) {
+      const from = candleData[Math.max(0, candleData.length - 30)].time
+      const to = candleData[candleData.length - 1].time
+      timeScale.setVisibleRange({ from, to })
+    }
+  }, [historicalData, activePair, timeframe]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Last candle for indicator bar
-  const pairCandles = candles[activePair] ?? []
+  const pairTimeframeKey = `${activePair}:${timeframe}`
+  const pairCandles = candles[pairTimeframeKey] ?? []
   const lastCandle  = pairCandles[pairCandles.length - 1]
 
   return (

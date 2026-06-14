@@ -14,6 +14,7 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
 	"github.com/dhnnnn/forexAnalysis/internal/graph"
+	"github.com/dhnnnn/forexAnalysis/internal/graph/model"
 	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 	"github.com/dhnnnn/forexAnalysis/internal/pipeline"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
@@ -137,6 +138,21 @@ func main() {
 	// ── Initialize GraphQL PubSub ─────────────────────────────────────
 	gqlPubSub := graph.NewPubSub()
 
+	// Register callback on MarketDataAgent to publish candles to GraphQL subscribers
+	marketAgent.SetOnCandleIngested(func(c agents.Candle) {
+		gqlPubSub.PublishCandle(c.Pair, &model.Candle{
+			Pair:      c.Pair,
+			Open:      c.Open,
+			High:      c.High,
+			Low:       c.Low,
+			Close:     c.Close,
+			Volume:    c.Volume,
+			Spread:    c.Spread,
+			Timeframe: c.Timeframe,
+			Timestamp: c.Timestamp.Format(time.RFC3339),
+		})
+	})
+
 	// ── Build Pipeline ────────────────────────────────────────────────
 	signalStore := agents.NewSignalStore()
 	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
@@ -227,7 +243,12 @@ func main() {
 
 	// ── Pipeline Loop ─────────────────────────────────────────────────
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		// Jalankan evaluasi pipeline pertama kali secara langsung agar halaman awal langsung terisi data
+		slog.Info("Running initial pipeline evaluation...")
+		p.RunAll(ctx)
+		p.ProcessMetaObserver(ctx)
+
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 
 		for {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 
@@ -29,9 +30,11 @@ type MarketDataAgent struct {
 
 	wsFeed     *feed.WebSocketFeed
 	restPoller *feed.RESTPoller
+
+	onCandleIngested func(Candle) // Callback for real-time publishing
 }
 
-// NewMarketDataAgent membuat MarketDataAgent baru.
+// NewMarketDataAgent membuat MarketDataAgent baru dengan pre-population data historis.
 func NewMarketDataAgent(
 	pairs, timeframes []string,
 	wsFeed *feed.WebSocketFeed,
@@ -53,7 +56,59 @@ func NewMarketDataAgent(
 		}
 	}
 
+	// Pre-populate dengan historical mock candles agar sistem bisa langsung berjalan
+	basePrice := map[string]float64{
+		"EUR_USD": 1.08450,
+		"GBP_USD": 1.27230,
+		"USD_JPY": 149.850,
+		"AUD_USD": 0.66780,
+	}
+
+	now := time.Now()
+	for _, p := range pairs {
+		price, ok := basePrice[p]
+		if !ok {
+			price = 1.00000
+		}
+		for _, tf := range timeframes {
+			key := bufferKey(p, tf)
+			duration := parseTimeframeDuration(tf)
+
+			// Generate 100 historical candles
+			for i := 100; i >= 1; i-- {
+				t := now.Add(-time.Duration(i) * duration).Truncate(duration)
+				seconds := float64(t.Unix())
+				trend := math.Sin(seconds/150.0) * 0.00080
+				noise := float64(t.UnixNano()%100-50) * 0.00001
+
+				openPrice := price + trend - noise
+				closePrice := price + trend + noise
+				high := math.Max(openPrice, closePrice) + 0.00020
+				low := math.Min(openPrice, closePrice) - 0.00015
+
+				a.buffers[key] = append(a.buffers[key], Candle{
+					Pair:      p,
+					Open:      openPrice,
+					High:      high,
+					Low:       low,
+					Close:     closePrice,
+					Volume:    float64(t.Unix() % 10000),
+					Spread:    1.2,
+					Timeframe: tf,
+					Timestamp: t,
+				})
+			}
+		}
+	}
+
 	return a
+}
+
+// SetOnCandleIngested mendaftarkan callback untuk menerima candle baru yang di-ingest.
+func (a *MarketDataAgent) SetOnCandleIngested(cb func(Candle)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onCandleIngested = cb
 }
 
 // Name mengembalikan nama agent.
@@ -129,46 +184,58 @@ func (a *MarketDataAgent) StartCollecting(ctx context.Context) {
 	}()
 }
 
-// ingestCandle mengkonversi OHLCVCandle → Candle dan menambahkan ke rolling buffer.
+// ingestCandle mereplikasi dan mengupdate/menambahkan candle ke semua buffer timeframe yang terdaftar.
 func (a *MarketDataAgent) ingestCandle(raw feed.OHLCVCandle) {
-	candle := Candle{
-		Pair:      raw.Pair,
-		Open:      raw.Open,
-		High:      raw.High,
-		Low:       raw.Low,
-		Close:     raw.Close,
-		Volume:    raw.Volume,
-		Spread:    raw.Spread,
-		Timeframe: raw.Timeframe,
-		Timestamp: raw.Timestamp,
-	}
+	// Replikasi ticks ke semua timeframe yang terdaftar
+	for _, tf := range a.timeframes {
+		duration := parseTimeframeDuration(tf)
+		truncatedTime := raw.Timestamp.Truncate(duration)
+		key := bufferKey(raw.Pair, tf)
 
-	key := bufferKey(raw.Pair, raw.Timeframe)
+		a.mu.Lock()
+		buf := a.buffers[key]
+		var updated Candle
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
+		if len(buf) > 0 && buf[len(buf)-1].Timestamp.Equal(truncatedTime) {
+			// Update candle yang sedang berjalan (current period)
+			last := &buf[len(buf)-1]
+			last.Close = raw.Close
+			if raw.High > last.High {
+				last.High = raw.High
+			}
+			if raw.Low < last.Low {
+				last.Low = raw.Low
+			}
+			last.Volume += raw.Volume
+			last.Spread = raw.Spread
+			updated = *last
+		} else {
+			// Buat candle baru untuk period berikutnya
+			candle := Candle{
+				Pair:      raw.Pair,
+				Open:      raw.Open,
+				High:      raw.High,
+				Low:       raw.Low,
+				Close:     raw.Close,
+				Volume:    raw.Volume,
+				Spread:    raw.Spread,
+				Timeframe: tf,
+				Timestamp: truncatedTime,
+			}
+			if len(buf) >= MaxBufferSize {
+				buf = buf[1:]
+			}
+			a.buffers[key] = append(buf, candle)
+			updated = candle
+		}
 
-	buf, exists := a.buffers[key]
-	if !exists {
-		// Auto-create buffer untuk pair/timeframe yang belum terdaftar
-		buf = make([]Candle, 0, MaxBufferSize)
-	}
+		cb := a.onCandleIngested
+		a.mu.Unlock()
 
-	// Rolling buffer: buang candle tertua jika sudah penuh
-	if len(buf) >= MaxBufferSize {
-		buf = buf[1:]
-	}
-
-	a.buffers[key] = append(buf, candle)
-
-	bufLen := len(a.buffers[key])
-	if bufLen%10 == 0 { // Log setiap 10 candle biar tidak spam
-		slog.Info("MarketDataAgent: buffer updated",
-			"pair", raw.Pair,
-			"timeframe", raw.Timeframe,
-			"buffer_size", bufLen,
-			"close", candle.Close,
-		)
+		// Trigger callback jika terdaftar untuk real-time update
+		if cb != nil {
+			cb(updated)
+		}
 	}
 }
 
@@ -231,4 +298,20 @@ func (a *MarketDataAgent) defaultTimeframe() string {
 // bufferKey menghasilkan key unik untuk buffer map.
 func bufferKey(pair, timeframe string) string {
 	return pair + ":" + timeframe
+}
+
+// parseTimeframeDuration mengonversi string timeframe ke time.Duration.
+func parseTimeframeDuration(tf string) time.Duration {
+	switch tf {
+	case "5m":
+		return 5 * time.Minute
+	case "15m":
+		return 15 * time.Minute
+	case "1h":
+		return time.Hour
+	case "4h":
+		return 4 * time.Hour
+	default:
+		return time.Hour
+	}
 }
