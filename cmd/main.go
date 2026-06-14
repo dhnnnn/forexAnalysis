@@ -166,6 +166,11 @@ func main() {
 	// Hook KB Store ke DecisionAgent untuk adaptive weights
 	decisionAgent.SetKBStore(kbStore)
 
+	// ── Initialize Broadcaster ────────────────────────────────────────
+	broadcaster := knowledge.NewBroadcaster(kbStore)
+	broadcaster.Subscribe(technicalAgent)
+	slog.Info("Broadcaster initialized", "subscribers", broadcaster.SubscriberCount())
+
 	// ── Initialize Signal Store (untuk evaluator) ─────────────────────
 	signalStore := agents.NewSignalStore()
 	evalDelay := time.Duration(cfg.MetaObserver.EvalDelayMinutes) * time.Minute
@@ -264,7 +269,7 @@ func main() {
 					go func(pair string) {
 						defer wg.Done()
 						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, chatHandler, store)
+							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, broadcaster, chatHandler, store)
 					}(pair)
 				}
 				wg.Wait()
@@ -274,12 +279,30 @@ func main() {
 				if len(reports) > 0 {
 					slog.Info("🚨 MetaObserver detected degradation", "report_count", len(reports))
 
+					// Persist ExperienceReports ke Postgres
+					if store != nil {
+						go func() {
+							if err := store.InsertExperienceReports(ctx, reports); err != nil {
+								slog.Debug("⚠️ Failed to persist experience reports", "error", err)
+							}
+						}()
+					}
+
 					// KnowledgeTransferAgent: proses reports → KnowledgeRules
 					newRules := ktaAgent.Process(ctx, reports)
 					if len(newRules) > 0 {
 						slog.Info("✨ KTA generated new rules",
 							"rule_count", len(newRules),
 						)
+
+						// Persist rules ke Postgres
+						if store != nil {
+							go func() {
+								if err := store.InsertKnowledgeRules(ctx, newRules); err != nil {
+									slog.Debug("⚠️ Failed to persist knowledge rules", "error", err)
+								}
+							}()
+						}
 					}
 				}
 
@@ -308,19 +331,46 @@ func main() {
 				}
 
 				for _, sig := range readySignals {
-					correct := evaluateSignal(sig, marketAgent, cfg.Scheduler.Timeframes[0], pipThreshold)
-					metaObserver.RecordOutcome(agents.SignalOutcome{
-						AgentName: "TechnicalAgent", // Evaluasi sebagai technical signal
-						Pair:      sig.Pair,
-						Correct:   correct,
-						Regime:    sig.Regime,
-						Timestamp: time.Now(),
-					})
+					correct, pipsMove, evalPrice := evaluateSignalFull(sig, marketAgent, cfg.Scheduler.Timeframes[0], pipThreshold)
+
+					// Record outcome ke KEDUA agen (Technical + Fundamental)
+					for _, agentName := range []string{"TechnicalAgent", "FundamentalAgent"} {
+						metaObserver.RecordOutcome(agents.SignalOutcome{
+							AgentName: agentName,
+							Pair:      sig.Pair,
+							Correct:   correct,
+							Regime:    sig.Regime,
+							Timestamp: time.Now(),
+						})
+					}
+
+					// Persist ke Postgres (non-blocking)
+					if store != nil {
+						go func(s agents.PendingSignal, c bool, pm float64, ep float64) {
+							entry := storage.PerformanceLogEntry{
+								AgentName:  "TechnicalAgent",
+								Pair:       s.Pair,
+								Regime:     string(s.Regime),
+								Signal:     s.Signal,
+								EntryPrice: s.Entry,
+								EvalPrice:  ep,
+								Correct:    c,
+								PipsMove:   pm,
+								SignalTime:  s.CreatedAt,
+								EvalTime:   time.Now(),
+							}
+							if err := store.InsertPerformanceLog(ctx, entry); err != nil {
+								slog.Debug("⚠️ Failed to persist performance log", "error", err)
+							}
+						}(sig, correct, pipsMove, evalPrice)
+					}
 
 					slog.Debug("📋 Signal evaluated",
 						"pair", sig.Pair,
 						"signal", sig.Signal,
 						"entry", fmt.Sprintf("%.5f", sig.Entry),
+						"eval_price", fmt.Sprintf("%.5f", evalPrice),
+						"pips_move", fmt.Sprintf("%.1f", pipsMove),
 						"correct", correct,
 						"regime", string(sig.Regime),
 					)
@@ -362,6 +412,7 @@ func runPipeline(
 	metaObserver *agents.MetaObserverAgent,
 	signalStore *agents.SignalStore,
 	evalDelay time.Duration,
+	broadcaster *knowledge.Broadcaster,
 	chatHandler *chatbot.Handler,
 	store *storage.Store,
 ) {
@@ -397,6 +448,26 @@ func runPipeline(
 		"volatility", fmt.Sprintf("%.4f", regimeCtx.Volatility),
 		"trend_strength", fmt.Sprintf("%.2f", regimeCtx.TrendStrength),
 	)
+
+	// Persist regime log ke Postgres (non-blocking)
+	if store != nil {
+		go func() {
+			if err := store.InsertRegimeLog(ctx, storage.RegimeLogEntry{
+				Pair:          pair,
+				Regime:        string(regimeCtx.Regime),
+				ADX:           regimeCtx.ADX,
+				ATR:           regimeCtx.ATR,
+				Volatility:    regimeCtx.Volatility,
+				TrendStrength: regimeCtx.TrendStrength,
+				DetectedAt:    regimeCtx.DetectedAt,
+			}); err != nil {
+				slog.Debug("⚠️ Failed to persist regime log", "pair", pair, "error", err)
+			}
+		}()
+	}
+
+	// ── Broadcast KnowledgeRules ke semua subscriber agents ───────────
+	broadcaster.Broadcast(ctx, regimeCtx)
 
 	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
 	var techOutput, fundOutput agents.AgentOutput
@@ -537,19 +608,19 @@ func runPipeline(
 // evaluateSignal — cek apakah sinyal benar berdasarkan pergerakan harga aktual
 // ════════════════════════════════════════════════════════════════════════════════
 
-// evaluateSignal membandingkan harga entry dengan harga saat ini.
+// evaluateSignalFull membandingkan harga entry dengan harga saat ini.
+// Return: correct, pipsMove, evalPrice.
 // Sinyal dianggap benar jika harga bergerak >= pipThreshold pip ke arah prediksi.
-// Jika data harga tidak tersedia, default ke false (conservative).
-func evaluateSignal(sig agents.PendingSignal, marketAgent *agents.MarketDataAgent, timeframe string, pipThreshold float64) bool {
+func evaluateSignalFull(sig agents.PendingSignal, marketAgent *agents.MarketDataAgent, timeframe string, pipThreshold float64) (bool, float64, float64) {
 	// Ambil harga terbaru dari buffer
 	latest := marketAgent.GetLatestCandle(sig.Pair, timeframe)
 	if latest == nil {
-		return false // tidak ada data, anggap salah (conservative)
+		return false, 0, 0
 	}
 
 	currentPrice := latest.Close
 	pipSize := 0.0001 // Major pairs
-	if len(sig.Pair) > 3 && (sig.Pair[4:] == "JPY" || sig.Pair[:3] == "JPY") {
+	if len(sig.Pair) > 4 && (sig.Pair[4:] == "JPY" || sig.Pair[:3] == "JPY") {
 		pipSize = 0.01 // JPY pairs
 	}
 
@@ -557,12 +628,10 @@ func evaluateSignal(sig agents.PendingSignal, marketAgent *agents.MarketDataAgen
 
 	switch sig.Signal {
 	case "BUY":
-		// BUY benar jika harga naik >= pipThreshold
-		return pipsMove >= pipThreshold
+		return pipsMove >= pipThreshold, pipsMove, currentPrice
 	case "SELL":
-		// SELL benar jika harga turun >= pipThreshold
-		return -pipsMove >= pipThreshold
+		return -pipsMove >= pipThreshold, -pipsMove, currentPrice
 	default:
-		return false
+		return false, 0, currentPrice
 	}
 }

@@ -3,15 +3,24 @@ package agents
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dhnnnn/forexAnalysis/internal/indicators"
+	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 )
 
 // TechnicalAgent (Agent 2) computes technical indicators and produces
 // a BUY/SELL/HOLD signal with confidence.
-type TechnicalAgent struct{}
+type TechnicalAgent struct {
+	// Knowledge-aware fields
+	activeRules []knowledge.KnowledgeRule
+	regimeCtx   knowledge.RegimeContext
+	weightMod   float64 // modifier dari knowledge rules (-1.0 to 0.0)
+	mu          sync.RWMutex
+}
 
 // NewTechnicalAgent creates a new TechnicalAgent instance.
 func NewTechnicalAgent() *TechnicalAgent {
@@ -21,6 +30,48 @@ func NewTechnicalAgent() *TechnicalAgent {
 // Name returns the agent's identifier.
 func (a *TechnicalAgent) Name() string {
 	return "TechnicalAgent"
+}
+
+// AgentName implements knowledge.KnowledgeAware interface.
+func (a *TechnicalAgent) AgentName() string {
+	return "TechnicalAgent"
+}
+
+// ApplyKnowledge implements knowledge.KnowledgeAware interface.
+// Menerima rules aktif dan menyesuaikan confidence modifier internal.
+func (a *TechnicalAgent) ApplyKnowledge(rules []knowledge.KnowledgeRule, regime knowledge.RegimeContext) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	a.activeRules = rules
+	a.regimeCtx = regime
+	a.weightMod = 0.0
+
+	for _, rule := range rules {
+		if rule.Action.TargetAgent == "TechnicalAgent" {
+			a.weightMod += rule.Action.WeightDelta
+		}
+	}
+
+	// Clamp weight modifier
+	if a.weightMod < -0.5 {
+		a.weightMod = -0.5
+	}
+
+	if a.weightMod != 0 {
+		slog.Debug("🧠 TechnicalAgent: knowledge applied",
+			"weight_mod", fmt.Sprintf("%.2f", a.weightMod),
+			"rules_count", len(rules),
+			"regime", string(regime.Regime),
+		)
+	}
+}
+
+// getConfidenceModifier returns the current confidence modifier from KB rules.
+func (a *TechnicalAgent) getConfidenceModifier() float64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.weightMod
 }
 
 // Run executes technical analysis on the provided candle data.
@@ -63,9 +114,22 @@ func (a *TechnicalAgent) Run(ctx context.Context, input AgentInput) AgentOutput 
 	reason := buildReason(rsi, macdResult, bbResult.BBPosition)
 
 	// 10. Build and return successful output
+	// Apply knowledge-based confidence modifier jika ada rules aktif
+	confidence := scoreResult.Confidence
+	confMod := a.getConfidenceModifier()
+	if confMod != 0 {
+		confidence = confidence * (1.0 + confMod) // confMod negatif → kurangi confidence
+		if confidence < 0.1 {
+			confidence = 0.1
+		}
+		if confidence > 1.0 {
+			confidence = 1.0
+		}
+	}
+
 	output := TechnicalOutput{
 		Signal:     scoreResult.Signal,
-		Confidence: scoreResult.Confidence,
+		Confidence: confidence,
 		RSI:        rsi,
 		MACDHist:   macdResult.Histogram,
 		EMA50:      ema50,

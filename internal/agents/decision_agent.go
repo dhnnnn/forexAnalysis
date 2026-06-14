@@ -357,6 +357,12 @@ func (a *DecisionAgent) getAdaptiveConfig(ctx context.Context, regime *knowledge
 			}
 		}
 		applied++
+
+		// Increment apply count (best-effort, non-blocking)
+		go func(r knowledge.KnowledgeRule) {
+			r.ApplyCount++
+			_ = a.kbStore.SaveRule(ctx, r)
+		}(rule)
 	}
 
 	if applied == 0 {
