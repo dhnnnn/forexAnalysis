@@ -1,12 +1,14 @@
 package chatbot
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/dhnnnn/forex-agent/internal/agents"
 )
@@ -35,9 +37,12 @@ type UserState struct {
 
 // Handler menangani incoming chat messages dan menghasilkan respons.
 type Handler struct {
-	userState  *UserState
-	mu         sync.RWMutex
-	getStatus  func() string // callback untuk mendapatkan pipeline status
+	userState   *UserState
+	mu          sync.RWMutex
+	getStatus   func() string // callback untuk mendapatkan pipeline status
+	geminiChat  *GeminiChat   // AI chat integration
+	pairs       []string      // pairs yang dimonitor
+	lastSignal  string        // signal terakhir dari pipeline
 }
 
 // NewHandler membuat Handler baru dengan default state.
@@ -47,7 +52,25 @@ func NewHandler() *Handler {
 			Balance:     1000.0,
 			RiskPercent: 1.0,
 		},
+		pairs: []string{"EUR_USD", "GBP_USD"},
 	}
+}
+
+// SetGeminiChat mengatur Gemini AI chat client.
+func (h *Handler) SetGeminiChat(gc *GeminiChat) {
+	h.geminiChat = gc
+}
+
+// SetPairs mengatur list pairs yang dimonitor.
+func (h *Handler) SetPairs(pairs []string) {
+	h.pairs = pairs
+}
+
+// SetLastSignal mengupdate signal terakhir dari pipeline.
+func (h *Handler) SetLastSignal(signal string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastSignal = signal
 }
 
 // SetStatusFunc mengatur callback untuk mendapatkan pipeline status.
@@ -272,12 +295,28 @@ Untuk force analysis manual, tunggu pipeline ready.`
 }
 
 func (h *Handler) cmdDefault(msg string) string {
-	// For now, return a simple response. Later this can be connected to Gemini AI.
+	// Forward to Gemini AI for natural conversation
+	if h.geminiChat != nil {
+		h.mu.RLock()
+		chatCtx := ChatContext{
+			Balance:     h.userState.Balance,
+			RiskPercent: h.userState.RiskPercent,
+			Pairs:       h.pairs,
+			LastSignal:  h.lastSignal,
+		}
+		h.mu.RUnlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		return h.geminiChat.Ask(ctx, msg, chatCtx)
+	}
+
 	return fmt.Sprintf(`🤖 Saya belum mengerti "%s".
 
 Ketik /help untuk melihat daftar perintah yang tersedia.
 
-💡 Coming soon: AI chat untuk pertanyaan forex bebas!`, msg)
+💡 AI chat belum aktif — set GEMINI_API_KEY untuk mengaktifkan.`, msg)
 }
 
 // ════════════════════════════════════════════════════════════════════════

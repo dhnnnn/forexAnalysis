@@ -17,6 +17,7 @@ type Config struct {
 	Scheduler    SchedulerConfig    `yaml:"scheduler"`
 	Account      AccountConfig      `yaml:"account"`
 	Gemini       GeminiConfig       `yaml:"gemini"`
+	Groq         GroqConfig         `yaml:"groq"`
 	MLService    MLServiceConfig    `yaml:"ml_service"`
 	Signal       SignalConfig        `yaml:"signal"`
 	TimescaleDB  TimescaleDBConfig  `yaml:"timescaledb"`
@@ -56,6 +57,12 @@ type AccountConfig struct {
 }
 
 type GeminiConfig struct {
+	APIKey    string `yaml:"api_key"`
+	Model     string `yaml:"model"`
+	TimeoutMs int    `yaml:"timeout_ms"`
+}
+
+type GroqConfig struct {
 	APIKey    string `yaml:"api_key"`
 	Model     string `yaml:"model"`
 	TimeoutMs int    `yaml:"timeout_ms"`

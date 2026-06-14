@@ -130,6 +130,7 @@ func main() {
 	// ── Initialize ChatBot Handler ────────────────────────────────────
 	chatHandler := chatbot.NewHandler()
 	chatHandler.UpdateFromConfig(cfg.Account.Balance, cfg.Account.RiskPercent)
+	chatHandler.SetPairs(cfg.Pairs)
 	chatHandler.SetStatusFunc(func() string {
 		// Cek apakah ada pair yang sudah ready
 		for _, pair := range cfg.Pairs {
@@ -140,6 +141,15 @@ func main() {
 		}
 		return "🟡 Warming up — collecting candle data"
 	})
+
+	// Initialize AI Chat (Gemini primary + Groq fallback)
+	geminiChat := chatbot.NewGeminiChat(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
+	if cfg.Groq.APIKey != "" {
+		geminiChat.SetGroqFallback(cfg.Groq.APIKey, cfg.Groq.Model)
+		slog.Info("Groq fallback configured", "model", cfg.Groq.Model)
+	}
+	chatHandler.SetGeminiChat(geminiChat)
+	slog.Info("AI Chat initialized", "primary", cfg.Gemini.Model, "fallback", cfg.Groq.Model)
 
 	// ── Start HTTP server for chat ────────────────────────────────────
 	mux := http.NewServeMux()
@@ -163,7 +173,7 @@ func main() {
 
 	// ── Pipeline loop (check readiness every 10 seconds) ──────────────
 	go func() {
-		ticker := time.NewTicker(10 * time.Second)
+		ticker := time.NewTicker(5 * time.Minute) // Cek setiap 5 menit (hemat API quota)
 		defer ticker.Stop()
 
 		for {
@@ -267,6 +277,9 @@ func main() {
 							"tech_signal", d.TechSignal,
 							"fund_sentiment", d.FundSentiment,
 						)
+
+						// Update chatbot with latest signal
+						chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
 						if d.Signal != "HOLD" {
 							slog.Info("💰 Trade Signal",
 								"pair", pair,

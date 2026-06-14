@@ -69,13 +69,16 @@ func (f *WebSocketFeed) Start(ctx context.Context) {
 					// Noise random kecil
 					noise := float64(t.UnixNano()%100-50) * 0.00001
 
+					openPrice := price + trend - noise
 					closePrice := price + trend + noise
-					high := math.Max(price+trend, closePrice) + 0.00020
-					low := math.Min(price+trend, closePrice) - 0.00015
+
+					// High/Low HARUS meliputi Open dan Close
+					high := math.Max(openPrice, closePrice) + 0.00020
+					low := math.Min(openPrice, closePrice) - 0.00015
 
 					candle := OHLCVCandle{
 						Pair:      pair,
-						Open:      price + trend - noise,
+						Open:      openPrice,
 						High:      high,
 						Low:       low,
 						Close:     closePrice,
