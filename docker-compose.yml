@@ -1,0 +1,89 @@
+services:
+  # ════════════════════════════════════════
+  # TimescaleDB — Time-series database
+  # ════════════════════════════════════════
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: forex-timescaledb
+    environment:
+      POSTGRES_USER: forex_user
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-forexpass123}
+      POSTGRES_DB: forex_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forex_user -d forex_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ════════════════════════════════════════
+  # Redis — Cache (price + sentiment)
+  # ════════════════════════════════════════
+  redis:
+    image: redis:7-alpine
+    container_name: forex-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispass123}
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispass123}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ════════════════════════════════════════
+  # Go Forex Agent — Core engine
+  # ════════════════════════════════════════
+  forex-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: forex-agent
+    env_file:
+      - .env
+    environment:
+      - TZ=Asia/Jakarta
+    ports:
+      - "8080:8080"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      whatsapp:
+        condition: service_started
+    restart: unless-stopped
+
+  # ════════════════════════════════════════
+  # WhatsApp Service — Node.js + whatsapp-web.js
+  # ════════════════════════════════════════
+  whatsapp:
+    build:
+      context: ./whatsapp-service
+      dockerfile: Dockerfile
+    container_name: forex-whatsapp
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - WA_TARGET_PHONE=${WA_TARGET_PHONE}
+      - GO_AGENT_URL=http://forex-agent:8080
+    volumes:
+      - wa_session:/app/session
+    shm_size: '256m'
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  timescale_data:
+  wa_session:

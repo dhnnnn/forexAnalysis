@@ -1,0 +1,88 @@
+# ========================================
+# Forex Multi-Agent Bot — Configuration
+# ========================================
+
+# --- Broker & Data Sources ---
+oanda:
+  websocket_url: "wss://stream-fxtrade.oanda.com/v3/accounts/${OANDA_ACCOUNT_ID}/pricing/stream"
+  api_key: "${OANDA_API_KEY}"
+  account_id: "${OANDA_ACCOUNT_ID}"
+
+twelve_data:
+  api_key: "${TWELVE_DATA_KEY}"
+  base_url: "https://api.twelvedata.com"
+
+alpha_vantage:
+  api_key: "${ALPHA_VANTAGE_KEY}"
+  base_url: "https://www.alphavantage.co/query"
+
+# --- RSS News Feeds ---
+rss_feeds:
+  urls:
+    - "https://www.forexfactory.com/rss"
+    - "https://www.fxstreet.com/rss/news"
+    - "https://www.investing.com/rss/news_14.rss"
+
+# --- Currency Pairs ---
+pairs:
+  - "EUR_USD"
+  - "GBP_USD"
+
+# --- Timeframes ---
+# Urutan penting: timeframe pertama adalah "active timeframe" yang dipakai pipeline.
+# Harus match dengan timeframe yang dihasilkan oleh data feed (WebSocket/REST).
+scheduler:
+  timeframes: ["1h", "5m", "15m", "4h"]
+
+# --- Account Settings ---
+account:
+  balance: 1000.0
+  risk_percent: 1.0
+  default_sl_pips: 20.0
+  default_tp_pips: 40.0
+
+# --- AI & ML ---
+gemini:
+  api_key: "${GEMINI_API_KEY}"
+  model: "gemini-2.0-flash"
+  timeout_ms: 5000
+
+# Groq sebagai fallback jika Gemini kena rate limit
+groq:
+  api_key: "${GROQ_API_KEY}"
+  model: "llama-3.3-70b-versatile"
+  timeout_ms: 8000
+
+ml_service:
+  enabled: false
+  grpc_address: "localhost:50051"
+  timeout_ms: 500
+
+# --- Signal Thresholds (Decision Agent) ---
+# buy_threshold diturunkan ke 0.60 agar mock data bisa trigger BUY untuk testing
+signal:
+  buy_threshold: 0.60
+  sell_threshold: 0.35
+  min_confidence_to_alert: 0.55
+  weights:
+    technical: 0.60
+    fundamental: 0.40
+  ml_boost_weight: 0.20
+
+# --- Storage ---
+timescaledb:
+  dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
+
+redis:
+  address: "redis:6379"
+  password: "${REDIS_PASSWORD}"
+  sentiment_ttl_minutes: 30
+  price_ttl_seconds: 10
+
+# --- WhatsApp ---
+# service_url: gunakan "http://whatsapp:3001" jika di Docker, "http://localhost:3001" jika lokal
+whatsapp:
+  service_url: "http://whatsapp:3001"
+  target_phone: "${WA_TARGET_PHONE}"
+  min_confidence_to_alert: 0.55
+  rate_limit_seconds: 180
