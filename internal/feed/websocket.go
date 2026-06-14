@@ -3,6 +3,7 @@ package feed
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"time"
 )
@@ -60,18 +61,27 @@ func (f *WebSocketFeed) Start(ctx context.Context) {
 						price = 1.00000
 					}
 
-					// Simulasi pergerakan harga kecil (random walk sederhana)
-					variation := float64(t.UnixNano()%100-50) * 0.00001
-					close := price + variation
-					high := close + 0.00020
-					low := close - 0.00015
+					// Simulasi pergerakan harga dengan tren naik-turun (sinusoidal + noise)
+					// Ini bikin indikator teknikal kadang trigger BUY/SELL, bukan cuma HOLD
+					seconds := float64(t.Unix())
+					// Tren sinusoidal: cycle ~60 candle (5 menit = 300 detik di mock)
+					trend := math.Sin(seconds/150.0) * 0.00080
+					// Noise random kecil
+					noise := float64(t.UnixNano()%100-50) * 0.00001
+
+					openPrice := price + trend - noise
+					closePrice := price + trend + noise
+
+					// High/Low HARUS meliputi Open dan Close
+					high := math.Max(openPrice, closePrice) + 0.00020
+					low := math.Min(openPrice, closePrice) - 0.00015
 
 					candle := OHLCVCandle{
 						Pair:      pair,
-						Open:      price,
+						Open:      openPrice,
 						High:      high,
 						Low:       low,
-						Close:     close,
+						Close:     closePrice,
 						Volume:    float64(t.Unix() % 10000),
 						Spread:    1.2,
 						Timeframe: "1h",

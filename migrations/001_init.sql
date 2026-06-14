@@ -11,8 +11,8 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 -- ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS candles (
     time        TIMESTAMPTZ      NOT NULL,
-    pair        VARCHAR(10)      NOT NULL,
-    timeframe   VARCHAR(4)       NOT NULL DEFAULT '1h',
+    pair        TEXT             NOT NULL,
+    timeframe   TEXT             NOT NULL DEFAULT '1h',
     open        DOUBLE PRECISION NOT NULL,
     high        DOUBLE PRECISION NOT NULL,
     low         DOUBLE PRECISION NOT NULL,
@@ -29,17 +29,17 @@ CREATE INDEX IF NOT EXISTS idx_candles_pair_tf ON candles (pair, timeframe, time
 -- Tabel signals — Sinyal yang dihasilkan Decision Agent
 -- ────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS signals (
-    id              SERIAL PRIMARY KEY,
+    id              SERIAL,
     time            TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
-    pair            VARCHAR(10)      NOT NULL,
-    direction       VARCHAR(4)       NOT NULL,
+    pair            TEXT             NOT NULL,
+    direction       TEXT             NOT NULL,
     confidence      DOUBLE PRECISION,
     tech_score      DOUBLE PRECISION,
-    tech_signal     VARCHAR(4),
-    fund_sentiment  VARCHAR(10),
+    tech_signal     TEXT,
+    fund_sentiment  TEXT,
     fund_score      DOUBLE PRECISION,
     ml_score        DOUBLE PRECISION,
-    risk_level      VARCHAR(6),
+    risk_level      TEXT,
     lot_size        DOUBLE PRECISION,
     entry_price     DOUBLE PRECISION,
     stop_loss       DOUBLE PRECISION,
@@ -47,7 +47,8 @@ CREATE TABLE IF NOT EXISTS signals (
     sl_pips         DOUBLE PRECISION,
     tp_pips         DOUBLE PRECISION,
     tech_reason     TEXT,
-    fund_reason     TEXT
+    fund_reason     TEXT,
+    PRIMARY KEY (time, id)
 );
 
 SELECT create_hypertable('signals', 'time', if_not_exists => TRUE);

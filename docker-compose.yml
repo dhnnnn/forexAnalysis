@@ -49,30 +49,41 @@ services:
       - .env
     environment:
       - TZ=Asia/Jakarta
+    ports:
+      - "8080:8080"
     depends_on:
       timescaledb:
         condition: service_healthy
       redis:
         condition: service_healthy
+      whatsapp:
+        condition: service_started
     restart: unless-stopped
 
   # ════════════════════════════════════════
-  # WhatsApp Baileys Service — Node.js
-  # (Akan diaktifkan di Minggu 4)
+  # WhatsApp Service — Node.js + whatsapp-web.js
   # ════════════════════════════════════════
-  # whatsapp:
-  #   build:
-  #     context: ./wa_service
-  #     dockerfile: Dockerfile
-  #   container_name: forex-whatsapp
-  #   ports:
-  #     - "3001:3001"
-  #   env_file:
-  #     - ./wa_service/.env
-  #   volumes:
-  #     - wa_auth:/app/auth_info
-  #   restart: unless-stopped
+  whatsapp:
+    build:
+      context: ./whatsapp-service
+      dockerfile: Dockerfile
+    container_name: forex-whatsapp
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - WA_TARGET_PHONE=${WA_TARGET_PHONE}
+      - GO_AGENT_URL=http://forex-agent:8080
+    volumes:
+      - wa_session:/app/session
+    shm_size: '256m'
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
 
 volumes:
   timescale_data:
-  # wa_auth:
+  wa_session:
