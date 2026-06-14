@@ -1,0 +1,236 @@
+# ════════════════════════════════════════════════════════════════════════
+# GraphQL Schema — Forex Multi-Agent Dashboard
+# ════════════════════════════════════════════════════════════════════════
+
+# ── Enums ──────────────────────────────────────────────────────────────
+
+enum Signal {
+  BUY
+  SELL
+  HOLD
+}
+
+enum EvalStatus {
+  PENDING
+  CORRECT
+  INCORRECT
+  SKIPPED
+}
+
+enum MarketRegime {
+  TRENDING
+  RANGING
+  BREAKOUT
+  HIGH_VOL
+  LOW_VOL
+  UNKNOWN
+}
+
+enum LogLevel {
+  DEBUG
+  INFO
+  WARN
+  ERROR
+}
+
+enum PipelineEventType {
+  START
+  END
+}
+
+# ── Types ──────────────────────────────────────────────────────────────
+
+type Candle {
+  pair: String!
+  open: Float!
+  high: Float!
+  low: Float!
+  close: Float!
+  volume: Float!
+  spread: Float!
+  timeframe: String!
+  timestamp: String!
+}
+
+type SignalEntry {
+  id: Int!
+  timestamp: String!
+  pair: String!
+  signal: Signal!
+  confidence: Float!
+  regime: MarketRegime!
+  entry: Float!
+  stopLoss: Float!
+  takeProfit: Float!
+  lotSize: Float!
+  techSignal: String!
+  techConf: Float!
+  techReason: String!
+  fundSentiment: String!
+  fundConf: Float!
+  fundReason: String!
+  evalStatus: EvalStatus
+  evalPrice: Float
+  pipsMove: Float
+  evalTime: String
+}
+
+type AgentDebateEntry {
+  id: String!
+  timestamp: String!
+  pair: String!
+  agent: String!
+  signal: Signal!
+  confidence: Float!
+  reasoning: String!
+  details: AgentDetails
+}
+
+type AgentDetails {
+  rsi: Float
+  macdHist: Float
+  bbPosition: Float
+  ema50: Float
+  ema200: Float
+  sentiment: String
+  score: Float
+  regime: MarketRegime
+  techWeight: Float
+  fundWeight: Float
+}
+
+type RegimeContext {
+  pair: String!
+  regime: MarketRegime!
+  adx: Float!
+  atr: Float!
+  volatility: Float!
+  trendStrength: Float!
+  detectedAt: String!
+}
+
+type RegimeChange {
+  pair: String!
+  fromRegime: MarketRegime!
+  toRegime: MarketRegime!
+  adx: Float!
+  volatility: Float!
+  changedAt: String!
+}
+
+type KnowledgeRule {
+  id: String!
+  sourceAgent: String!
+  targetAgent: String!
+  regime: MarketRegime!
+  weightDelta: Float!
+  minWeight: Float!
+  confidence: Float!
+  reasoning: String!
+  applyCount: Int!
+  createdAt: String!
+  expiresAt: String!
+  status: String!
+}
+
+type AgentSummary {
+  agentName: String!
+  accuracy: Float!
+  accuracyPrev: Float!
+  winCount: Int!
+  lossCount: Int!
+  lossStreak: Int!
+  dominantRegime: MarketRegime!
+  history: [Boolean!]!
+}
+
+type PerformanceLog {
+  agentName: String!
+  pair: String!
+  regime: MarketRegime!
+  signal: Signal!
+  entryPrice: Float!
+  evalPrice: Float!
+  correct: Boolean!
+  pipsMove: Float!
+  signalTime: String!
+  evalTime: String!
+}
+
+type SystemLog {
+  timestamp: String!
+  level: LogLevel!
+  message: String!
+  agent: String
+  pair: String
+}
+
+type PipelineEvent {
+  type: PipelineEventType!
+  pair: String!
+  timestamp: String!
+  durationMs: Int
+}
+
+type AdaptiveWeights {
+  techWeight: Float!
+  fundWeight: Float!
+  rulesApplied: Int!
+  regime: MarketRegime!
+}
+
+# ── Queries ────────────────────────────────────────────────────────────
+
+type Query {
+  # Chart data
+  candles(pair: String!, timeframe: String!, limit: Int): [Candle!]!
+
+  # Signals history
+  signals(pair: String, limit: Int, status: EvalStatus): [SignalEntry!]!
+
+  # Agent performance
+  agentSummaries: [AgentSummary!]!
+  performanceLogs(agent: String, pair: String, limit: Int): [PerformanceLog!]!
+
+  # Knowledge
+  activeRules: [KnowledgeRule!]!
+  expiredRules(limit: Int): [KnowledgeRule!]!
+  adaptiveWeights(pair: String!): AdaptiveWeights
+
+  # Regime
+  currentRegime(pair: String!): RegimeContext
+  regimeHistory(pair: String!, limit: Int): [RegimeContext!]!
+  regimeChanges(pair: String!, limit: Int): [RegimeChange!]!
+
+  # System
+  logs(level: LogLevel, limit: Int): [SystemLog!]!
+
+  # Status
+  pairs: [String!]!
+  connectionStatus: String!
+}
+
+# ── Subscriptions (real-time via WebSocket) ────────────────────────────
+
+type Subscription {
+  # Real-time candle updates
+  candleUpdated(pair: String!): Candle!
+
+  # Agent debate (setiap pipeline cycle)
+  agentOutput(pair: String): AgentDebateEntry!
+
+  # Final signal generated
+  signalGenerated(pair: String): SignalEntry!
+
+  # Regime changed
+  regimeChanged(pair: String): RegimeContext!
+
+  # New knowledge rule
+  ruleCreated: KnowledgeRule!
+
+  # System log stream
+  logAdded(level: LogLevel): SystemLog!
+
+  # Pipeline lifecycle events
+  pipelineEvent(pair: String): PipelineEvent!
+}

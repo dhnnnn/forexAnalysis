@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/chatbot"
 	"github.com/dhnnnn/forexAnalysis/internal/config"
 	"github.com/dhnnnn/forexAnalysis/internal/feed"
+	"github.com/dhnnnn/forexAnalysis/internal/graph"
+	"github.com/dhnnnn/forexAnalysis/internal/graph/model"
 	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 	"github.com/dhnnnn/forexAnalysis/internal/storage"
@@ -240,6 +243,21 @@ func main() {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	// ── GraphQL endpoint ──────────────────────────────────────────────
+	gqlPubSub := graph.NewPubSub()
+	gqlResolver := &graph.Resolver{
+		Store:        store,
+		KBStore:      kbStore,
+		MarketAgent:  marketAgent,
+		MetaObserver: metaObserver,
+		PubSub:       gqlPubSub,
+		Pairs:        cfg.Pairs,
+		Timeframes:   cfg.Scheduler.Timeframes,
+	}
+	gqlHandler := graph.NewHandler(gqlResolver)
+	mux.Handle("/graphql", gqlHandler)
+	slog.Info("GraphQL endpoint initialized", "path", "/graphql")
+
 	httpServer := &http.Server{
 		Addr:    ":8080",
 		Handler: mux,
@@ -269,7 +287,7 @@ func main() {
 					go func(pair string) {
 						defer wg.Done()
 						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
-							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, broadcaster, chatHandler, store)
+							riskAgent, decisionAgent, whatsAppAgent, metaObserver, signalStore, evalDelay, broadcaster, gqlPubSub, chatHandler, store)
 					}(pair)
 				}
 				wg.Wait()
@@ -413,6 +431,7 @@ func runPipeline(
 	signalStore *agents.SignalStore,
 	evalDelay time.Duration,
 	broadcaster *knowledge.Broadcaster,
+	pubSub *graph.PubSub,
 	chatHandler *chatbot.Handler,
 	store *storage.Store,
 ) {
@@ -469,6 +488,17 @@ func runPipeline(
 	// ── Broadcast KnowledgeRules ke semua subscriber agents ───────────
 	broadcaster.Broadcast(ctx, regimeCtx)
 
+	// Publish regime ke GraphQL subscribers
+	pubSub.PublishRegime(&model.RegimeContext{
+		Pair:          pair,
+		Regime:        strings.ToUpper(string(regimeCtx.Regime)),
+		ADX:           regimeCtx.ADX,
+		ATR:           regimeCtx.ATR,
+		Volatility:    regimeCtx.Volatility,
+		TrendStrength: regimeCtx.TrendStrength,
+		DetectedAt:    regimeCtx.DetectedAt.Format(time.RFC3339),
+	})
+
 	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
 	var techOutput, fundOutput agents.AgentOutput
 
@@ -511,6 +541,44 @@ func runPipeline(
 
 	// Wait for both agents to complete
 	_ = g.Wait()
+
+	// Publish agent debate entries ke GraphQL subscribers
+	if techOutput.Success && techOutput.Technical != nil {
+		rsi := techOutput.Technical.RSI
+		macdH := techOutput.Technical.MACDHist
+		bbPos := techOutput.Technical.BBPosition
+		pubSub.PublishAgentOutput(&model.AgentDebateEntry{
+			ID:         fmt.Sprintf("tech-%s-%d", pair, time.Now().UnixMilli()),
+			Timestamp:  time.Now().Format(time.RFC3339),
+			Pair:       pair,
+			Agent:      "TechnicalAgent",
+			Signal:     techOutput.Technical.Signal,
+			Confidence: techOutput.Technical.Confidence,
+			Reasoning:  techOutput.Technical.Reason,
+			Details: &model.AgentDetails{
+				RSI:        &rsi,
+				MACDHist:   &macdH,
+				BBPosition: &bbPos,
+			},
+		})
+	}
+	if fundOutput.Success && fundOutput.Fundamental != nil {
+		score := fundOutput.Fundamental.Score
+		sent := fundOutput.Fundamental.Sentiment
+		pubSub.PublishAgentOutput(&model.AgentDebateEntry{
+			ID:         fmt.Sprintf("fund-%s-%d", pair, time.Now().UnixMilli()),
+			Timestamp:  time.Now().Format(time.RFC3339),
+			Pair:       pair,
+			Agent:      "FundamentalAgent",
+			Signal:     fundSentimentToSignal(fundOutput.Fundamental.Sentiment),
+			Confidence: fundOutput.Fundamental.Confidence,
+			Reasoning:  fundOutput.Fundamental.Reason,
+			Details: &model.AgentDetails{
+				Sentiment: &sent,
+				Score:     &score,
+			},
+		})
+	}
 
 	// ── Agent 4: Risk Management (needs technical signal) ─────────────
 	riskInput := agents.AgentInput{
@@ -633,5 +701,17 @@ func evaluateSignalFull(sig agents.PendingSignal, marketAgent *agents.MarketData
 		return -pipsMove >= pipThreshold, -pipsMove, currentPrice
 	default:
 		return false, 0, currentPrice
+	}
+}
+
+// fundSentimentToSignal maps fundamental sentiment ke signal string.
+func fundSentimentToSignal(sentiment string) string {
+	switch strings.ToLower(sentiment) {
+	case "bullish":
+		return "BUY"
+	case "bearish":
+		return "SELL"
+	default:
+		return "HOLD"
 	}
 }
