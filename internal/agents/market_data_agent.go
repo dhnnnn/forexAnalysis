@@ -79,7 +79,8 @@ func NewMarketDataAgent(
 				t := now.Add(-time.Duration(i) * duration).Truncate(duration)
 				seconds := float64(t.Unix())
 				trend := math.Sin(seconds/150.0) * 0.00080
-				noise := float64(t.UnixNano()%100-50) * 0.00001
+				// Use i instead of t.UnixNano() since truncated timestamps always yield a modulo 100 of 0.
+				noise := float64((i*17)%100-50) * 0.00002
 
 				openPrice := price + trend - noise
 				closePrice := price + trend + noise

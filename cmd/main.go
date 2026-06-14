@@ -79,6 +79,9 @@ func main() {
 
 	geminiTimeout := time.Duration(cfg.Gemini.TimeoutMs) * time.Millisecond
 	geminiClient := sentiment.NewGeminiClient(cfg.Gemini.APIKey, cfg.Gemini.Model, geminiTimeout)
+	if cfg.Groq.APIKey != "" {
+		geminiClient.SetGroqFallback(cfg.Groq.APIKey, cfg.Groq.Model)
+	}
 	sentimentTTL := time.Duration(cfg.Redis.SentimentTTLMin) * time.Minute
 	sentimentCache := sentiment.NewSentimentCache(redisClient, sentimentTTL)
 	newsFetcher := sentiment.NewNewsFetcher(cfg.AlphaVantage.APIKey, cfg.TwelveData.APIKey, cfg.RSSFeeds.URLs)

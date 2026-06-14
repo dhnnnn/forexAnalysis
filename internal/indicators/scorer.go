@@ -92,20 +92,36 @@ func ScoreBB(bbPosition float64) (score float64, direction string) {
 // and determines the final signal.
 //
 // Formula: TechScore = (RSIScore × 0.40) + (MACDScore × 0.40) + (BBScore × 0.20)
-// Signal thresholds: >= 0.65 → BUY, <= 0.35 → SELL, else → HOLD.
+// Signal thresholds: >= 0.60 → BUY, <= 0.40 → SELL, else → HOLD.
 // Confidence = TechScore.
 func ComputeScore(rsi float64, macd MACDResult, bbPosition float64) ScoreResult {
 	rsiScore, rsiDir := ScoreRSI(rsi)
 	macdScore, macdDir := ScoreMACD(macd)
 	bbScore, bbDir := ScoreBB(bbPosition)
 
-	techScore := (rsiScore * RSIWeight) + (macdScore * MACDWeight) + (bbScore * BBWeight)
+	// Adjust scores for direction: BUY adds to score (>0.5), SELL subtracts from score (<0.5)
+	adjRsi := rsiScore
+	if rsiDir == "SELL" {
+		adjRsi = 1.0 - rsiScore
+	}
+
+	adjMacd := macdScore
+	if macdDir == "SELL" {
+		adjMacd = 1.0 - macdScore
+	}
+
+	adjBb := bbScore
+	if bbDir == "SELL" {
+		adjBb = 1.0 - bbScore
+	}
+
+	techScore := (adjRsi * RSIWeight) + (adjMacd * MACDWeight) + (adjBb * BBWeight)
 
 	var signal string
 	switch {
-	case techScore >= 0.65:
+	case techScore >= 0.60:
 		signal = "BUY"
-	case techScore <= 0.35:
+	case techScore <= 0.40:
 		signal = "SELL"
 	default:
 		signal = "HOLD"

@@ -7,9 +7,13 @@ import { useAutoScroll } from '../../hooks/useAutoScroll'
 import { AgentCard } from './AgentCard'
 import type { AgentDebateEntry } from '../../types/agent'
 import { formatTime } from '../../utils/formatters'
-import { MessageSquare } from 'lucide-react'
+import { MessageSquare, ChevronRight } from 'lucide-react'
 
-export function AgentDebatePanel() {
+interface AgentDebatePanelProps {
+  onCollapseToggle?: () => void
+}
+
+export function AgentDebatePanel({ onCollapseToggle }: AgentDebatePanelProps) {
   const activePair = useConnectionStore((s) => s.activePair)
   const debates    = useAgentStore((s) => s.debates)
   const addEntry   = useAgentStore((s) => s.addDebateEntry)
@@ -33,17 +37,23 @@ export function AgentDebatePanel() {
 
   return (
     <aside
-      className="flex flex-col bg-bg-secondary border-l border-border-subtle"
-      style={{ width: 380, minWidth: 320 }}
+      className="flex flex-col flex-1 min-h-0 w-full"
       aria-label="Agent Debate Panel"
     >
       {/* Panel header */}
-      <div className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle flex-shrink-0">
+      <div 
+        className="flex items-center gap-2 px-4 py-3 border-b border-border-subtle flex-shrink-0 cursor-pointer hover:bg-bg-tertiary select-none group/header transition-colors"
+        onClick={onCollapseToggle}
+        title="Click to collapse panel"
+      >
         <MessageSquare size={14} className="text-[#58a6ff]" />
-        <span className="text-sm font-semibold text-text-primary">Agent Debate</span>
-        <span className="ml-auto text-xs text-text-muted">
+        <span className="text-sm font-semibold text-text-primary group-hover/header:text-agent-technical transition-colors">
+          Agent Debate
+        </span>
+        <span className="ml-auto text-xs text-text-muted group-hover/header:text-text-secondary transition-colors mr-1">
           {pairDebates.length} entries
         </span>
+        <ChevronRight size={14} className="text-text-muted group-hover/header:text-text-primary transition-colors" />
       </div>
 
       {/* Scrollable content */}
