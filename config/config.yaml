@@ -69,6 +69,13 @@ signal:
     fundamental: 0.40
   ml_boost_weight: 0.20
 
+# --- Regime Detection ---
+regime_detection:
+  adx_period: 14
+  atr_period: 14
+  adx_threshold: 25.0       # ADX > 25 = trending (standar industri)
+  vol_threshold: 0.015      # ATR/price > 1.5% = high volatility
+
 # --- Storage ---
 timescaledb:
   dsn: "postgres://forex_user:${DB_PASSWORD}@localhost:5432/forex_db?sslmode=disable"
