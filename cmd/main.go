@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/dhnnnn/forex-agent/internal/feed"
 	"github.com/dhnnnn/forex-agent/internal/sentiment"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/errgroup"
 )
 
 func main() {
@@ -171,7 +173,7 @@ func main() {
 		}
 	}()
 
-	// ── Pipeline loop (check readiness every 10 seconds) ──────────────
+	// ── Pipeline loop (concurrent execution) ──────────────────────────
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute) // Cek setiap 5 menit (hemat API quota)
 		defer ticker.Stop()
@@ -181,135 +183,17 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				// Process all pairs concurrently
+				var wg sync.WaitGroup
 				for _, pair := range cfg.Pairs {
-					// Agent 1: Check if MarketDataAgent has enough data
-					output := marketAgent.Run(ctx, agents.AgentInput{Pair: pair})
-					if !output.Success {
-						bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
-						slog.Debug("⏳ MarketDataAgent collecting...",
-							"pair", pair,
-							"buffer", fmt.Sprintf("%d/%d", bufSize, agents.MinCandlesRequired),
-						)
-						continue
-					}
-
-					candles := marketAgent.GetCandles(pair, cfg.Scheduler.Timeframes[0])
-
-					// Agent 2: Technical Analysis
-					techOutput := technicalAgent.Run(ctx, agents.AgentInput{
-						Pair:    pair,
-						Candles: candles,
-					})
-					if techOutput.Success && techOutput.Technical != nil {
-						slog.Debug("✅ TechnicalAgent completed",
-							"pair", pair,
-							"signal", techOutput.Technical.Signal,
-							"confidence", fmt.Sprintf("%.2f", techOutput.Technical.Confidence),
-							"tech_score", fmt.Sprintf("%.3f", techOutput.Technical.TechScore),
-						)
-					} else {
-						slog.Debug("⚠️ TechnicalAgent failed",
-							"pair", pair,
-							"error", techOutput.Error,
-						)
-					}
-
-					// Agent 3: Fundamental Analysis
-					fundOutput := fundamentalAgent.Run(ctx, agents.AgentInput{Pair: pair})
-					if fundOutput.Success && fundOutput.Fundamental != nil {
-						slog.Debug("✅ FundamentalAgent completed",
-							"pair", pair,
-							"sentiment", fundOutput.Fundamental.Sentiment,
-							"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
-							"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
-							"from_cache", fundOutput.Fundamental.FromCache,
-						)
-					} else {
-						slog.Debug("⚠️ FundamentalAgent failed",
-							"pair", pair,
-							"error", fundOutput.Error,
-						)
-					}
-
-					// Agent 4: Risk Management (needs technical signal)
-					riskInput := agents.AgentInput{
-						Pair:           pair,
-						Candles:        candles,
-						Technical:      techOutput.Technical,
-						AccountBalance: cfg.Account.Balance,
-						RiskPercent:    cfg.Account.RiskPercent,
-					}
-					riskOutput := riskAgent.Run(ctx, riskInput)
-					if riskOutput.Success && riskOutput.Risk != nil {
-						slog.Debug("✅ RiskAgent completed",
-							"pair", pair,
-							"lot_size", fmt.Sprintf("%.2f", riskOutput.Risk.LotSize),
-							"sl", fmt.Sprintf("%.5f", riskOutput.Risk.StopLoss),
-							"tp", fmt.Sprintf("%.5f", riskOutput.Risk.TakeProfit),
-						)
-					} else {
-						slog.Debug("⚠️ RiskAgent failed",
-							"pair", pair,
-							"error", riskOutput.Error,
-						)
-					}
-
-					// Agent 5: Decision (aggregate all)
-					decisionInput := agents.AgentInput{
-						Pair:           pair,
-						Candles:        candles,
-						Technical:      techOutput.Technical,
-						Fundamental:    fundOutput.Fundamental,
-						Risk:           riskOutput.Risk,
-						AccountBalance: cfg.Account.Balance,
-						RiskPercent:    cfg.Account.RiskPercent,
-					}
-					decisionOutput := decisionAgent.Run(ctx, decisionInput)
-
-					// Log final pipeline result at Info level
-					if decisionOutput.Success && decisionOutput.Decision != nil {
-						d := decisionOutput.Decision
-						slog.Info("📊 Pipeline completed",
-							"pair", pair,
-							"signal", d.Signal,
-							"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
-							"risk_level", d.RiskLevel,
-							"tech_signal", d.TechSignal,
-							"fund_sentiment", d.FundSentiment,
-						)
-
-						// Update chatbot with latest signal
-						chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
-						if d.Signal != "HOLD" {
-							slog.Info("💰 Trade Signal",
-								"pair", pair,
-								"signal", d.Signal,
-								"entry", fmt.Sprintf("%.5f", d.Entry),
-								"sl", fmt.Sprintf("%.5f", d.StopLoss),
-								"tp", fmt.Sprintf("%.5f", d.TakeProfit),
-								"lot", fmt.Sprintf("%.2f", d.LotSize),
-							)
-						}
-
-						// Agent 6: WhatsApp Notification
-						waInput := agents.AgentInput{
-							Pair:     pair,
-							Decision: decisionOutput.Decision,
-						}
-						waOutput := whatsAppAgent.Run(ctx, waInput)
-						if !waOutput.Success {
-							slog.Debug("⚠️ WhatsAppAgent failed",
-								"pair", pair,
-								"error", waOutput.Error,
-							)
-						}
-					} else {
-						slog.Warn("⚠️ DecisionAgent failed",
-							"pair", pair,
-							"error", decisionOutput.Error,
-						)
-					}
+					wg.Add(1)
+					go func(pair string) {
+						defer wg.Done()
+						runPipeline(ctx, pair, cfg, marketAgent, technicalAgent, fundamentalAgent,
+							riskAgent, decisionAgent, whatsAppAgent, chatHandler)
+					}(pair)
 				}
+				wg.Wait()
 			}
 		}
 	}()
@@ -327,4 +211,146 @@ func main() {
 	// Give goroutines time to cleanup
 	time.Sleep(1 * time.Second)
 	slog.Info("🛑 Forex Multi-Agent Bot stopped. Bye!")
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// runPipeline — proses satu pair dengan concurrent TechnicalAgent + FundamentalAgent
+// ════════════════════════════════════════════════════════════════════════════════
+
+func runPipeline(
+	ctx context.Context,
+	pair string,
+	cfg *config.Config,
+	marketAgent *agents.MarketDataAgent,
+	technicalAgent *agents.TechnicalAgent,
+	fundamentalAgent *agents.FundamentalAgent,
+	riskAgent *agents.RiskAgent,
+	decisionAgent *agents.DecisionAgent,
+	whatsAppAgent *agents.WhatsAppAgent,
+	chatHandler *chatbot.Handler,
+) {
+	// Agent 1: Check if MarketDataAgent has enough data
+	output := marketAgent.Run(ctx, agents.AgentInput{Pair: pair})
+	if !output.Success {
+		bufSize := marketAgent.BufferSize(pair, cfg.Scheduler.Timeframes[0])
+		slog.Debug("⏳ MarketDataAgent collecting...",
+			"pair", pair,
+			"buffer", fmt.Sprintf("%d/%d", bufSize, agents.MinCandlesRequired),
+		)
+		return
+	}
+
+	candles := marketAgent.GetCandles(pair, cfg.Scheduler.Timeframes[0])
+
+	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
+	var techOutput, fundOutput agents.AgentOutput
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	g.Go(func() error {
+		techOutput = technicalAgent.Run(gCtx, agents.AgentInput{
+			Pair:    pair,
+			Candles: candles,
+		})
+		if techOutput.Success && techOutput.Technical != nil {
+			slog.Debug("✅ TechnicalAgent completed",
+				"pair", pair,
+				"signal", techOutput.Technical.Signal,
+				"confidence", fmt.Sprintf("%.2f", techOutput.Technical.Confidence),
+				"tech_score", fmt.Sprintf("%.3f", techOutput.Technical.TechScore),
+			)
+		} else {
+			slog.Debug("⚠️ TechnicalAgent failed", "pair", pair, "error", techOutput.Error)
+		}
+		return nil // non-fatal: pipeline tetap jalan meskipun satu agent gagal
+	})
+
+	g.Go(func() error {
+		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair})
+		if fundOutput.Success && fundOutput.Fundamental != nil {
+			slog.Debug("✅ FundamentalAgent completed",
+				"pair", pair,
+				"sentiment", fundOutput.Fundamental.Sentiment,
+				"confidence", fmt.Sprintf("%.2f", fundOutput.Fundamental.Confidence),
+				"score", fmt.Sprintf("%.3f", fundOutput.Fundamental.Score),
+				"from_cache", fundOutput.Fundamental.FromCache,
+			)
+		} else {
+			slog.Debug("⚠️ FundamentalAgent failed", "pair", pair, "error", fundOutput.Error)
+		}
+		return nil
+	})
+
+	// Wait for both agents to complete
+	_ = g.Wait()
+
+	// ── Agent 4: Risk Management (needs technical signal) ─────────────
+	riskInput := agents.AgentInput{
+		Pair:           pair,
+		Candles:        candles,
+		Technical:      techOutput.Technical,
+		AccountBalance: cfg.Account.Balance,
+		RiskPercent:    cfg.Account.RiskPercent,
+	}
+	riskOutput := riskAgent.Run(ctx, riskInput)
+	if riskOutput.Success && riskOutput.Risk != nil {
+		slog.Debug("✅ RiskAgent completed",
+			"pair", pair,
+			"lot_size", fmt.Sprintf("%.2f", riskOutput.Risk.LotSize),
+			"sl", fmt.Sprintf("%.5f", riskOutput.Risk.StopLoss),
+			"tp", fmt.Sprintf("%.5f", riskOutput.Risk.TakeProfit),
+		)
+	} else {
+		slog.Debug("⚠️ RiskAgent failed", "pair", pair, "error", riskOutput.Error)
+	}
+
+	// ── Agent 5: Decision (aggregate all) ─────────────────────────────
+	decisionInput := agents.AgentInput{
+		Pair:           pair,
+		Candles:        candles,
+		Technical:      techOutput.Technical,
+		Fundamental:    fundOutput.Fundamental,
+		Risk:           riskOutput.Risk,
+		AccountBalance: cfg.Account.Balance,
+		RiskPercent:    cfg.Account.RiskPercent,
+	}
+	decisionOutput := decisionAgent.Run(ctx, decisionInput)
+
+	// Log final pipeline result
+	if decisionOutput.Success && decisionOutput.Decision != nil {
+		d := decisionOutput.Decision
+		slog.Info("📊 Pipeline completed",
+			"pair", pair,
+			"signal", d.Signal,
+			"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
+			"risk_level", d.RiskLevel,
+			"tech_signal", d.TechSignal,
+			"fund_sentiment", d.FundSentiment,
+		)
+
+		// Update chatbot with latest signal
+		chatHandler.SetLastSignal(fmt.Sprintf("%s %s %d%%", d.Signal, pair, d.ConfPct))
+		if d.Signal != "HOLD" {
+			slog.Info("💰 Trade Signal",
+				"pair", pair,
+				"signal", d.Signal,
+				"entry", fmt.Sprintf("%.5f", d.Entry),
+				"sl", fmt.Sprintf("%.5f", d.StopLoss),
+				"tp", fmt.Sprintf("%.5f", d.TakeProfit),
+				"lot", fmt.Sprintf("%.2f", d.LotSize),
+			)
+		}
+
+		// ── Agent 6: WhatsApp Notification ────────────────────────────
+		waInput := agents.AgentInput{
+			Pair:     pair,
+			Decision: decisionOutput.Decision,
+		}
+		waOutput := whatsAppAgent.Run(ctx, waInput)
+		if !waOutput.Success {
+			slog.Debug("⚠️ WhatsAppAgent failed", "pair", pair, "error", waOutput.Error)
+		}
+	} else {
+		slog.Warn("⚠️ DecisionAgent failed", "pair", pair, "error", decisionOutput.Error)
+	}
 }
