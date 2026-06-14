@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"time"
+
+	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 )
 
 // ════════════════════════════════════════════════════════════════════════
@@ -124,6 +126,7 @@ func (a *DecisionAgent) Run(ctx context.Context, input AgentInput) AgentOutput {
 			MLScore:       mlScore,
 			RiskLevel:     riskLevel,
 			Pair:          input.Pair,
+			Regime:        regimeStr(input.Regime),
 			Timestamp:     time.Now(),
 		},
 	}
@@ -280,4 +283,12 @@ func assessRiskLevel(confidence float64) string {
 		return "MEDIUM"
 	}
 	return "HIGH"
+}
+
+// regimeStr mengekstrak string regime dari RegimeContext pointer (nil-safe).
+func regimeStr(regime *knowledge.RegimeContext) string {
+	if regime == nil {
+		return "unknown"
+	}
+	return string(regime.Regime)
 }

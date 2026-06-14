@@ -3,6 +3,8 @@ package agents
 import (
 	"context"
 	"time"
+
+	"github.com/dhnnnn/forexAnalysis/internal/knowledge"
 )
 
 // ════════════════════════════════════════════════════════════════════════
@@ -48,6 +50,9 @@ type AgentInput struct {
 	Fundamental *FundamentalOutput // dari FundamentalAgent (Agent 3)
 	Risk        *RiskOutput        // dari RiskAgent (Agent 4)
 	Decision    *DecisionOutput    // dari DecisionAgent (Agent 5)
+
+	// Regime context dari RegimeDetectionAgent
+	Regime *knowledge.RegimeContext
 
 	// Account parameters (untuk RiskAgent)
 	AccountBalance float64
@@ -170,5 +175,6 @@ type DecisionOutput struct {
 
 	RiskLevel string    `json:"risk_level"` // "LOW" | "MEDIUM" | "HIGH"
 	Pair      string    `json:"pair"`
+	Regime    string    `json:"regime"` // market regime saat sinyal dibuat
 	Timestamp time.Time `json:"timestamp"`
 }

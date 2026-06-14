@@ -22,6 +22,14 @@ type RegimeDetectionAgent struct {
 	volThreshold float64 // ATR/price relatif, di atas ini = high volatility
 }
 
+// RegimeConfig menyimpan konfigurasi dari config.yaml untuk RegimeDetectionAgent.
+type RegimeConfig struct {
+	ADXPeriod    int
+	ATRPeriod    int
+	ADXThreshold float64
+	VolThreshold float64
+}
+
 // NewRegimeDetectionAgent membuat instance baru dengan parameter default industri.
 func NewRegimeDetectionAgent() *RegimeDetectionAgent {
 	return &RegimeDetectionAgent{
@@ -30,6 +38,24 @@ func NewRegimeDetectionAgent() *RegimeDetectionAgent {
 		adxThreshold: 25.0,  // ADX > 25 = trending (standar industri)
 		volThreshold: 0.015, // ATR/price > 1.5% = high volatility
 	}
+}
+
+// NewRegimeDetectionAgentWithConfig membuat instance dengan konfigurasi custom.
+func NewRegimeDetectionAgentWithConfig(cfg RegimeConfig) *RegimeDetectionAgent {
+	agent := NewRegimeDetectionAgent()
+	if cfg.ADXPeriod > 0 {
+		agent.adxPeriod = cfg.ADXPeriod
+	}
+	if cfg.ATRPeriod > 0 {
+		agent.atrPeriod = cfg.ATRPeriod
+	}
+	if cfg.ADXThreshold > 0 {
+		agent.adxThreshold = cfg.ADXThreshold
+	}
+	if cfg.VolThreshold > 0 {
+		agent.volThreshold = cfg.VolThreshold
+	}
+	return agent
 }
 
 // Name mengembalikan identifier agent.

@@ -81,6 +81,15 @@ func main() {
 	technicalAgent := agents.NewTechnicalAgent()
 	slog.Info("Agent initialized", "agent", technicalAgent.Name())
 
+	// ── Initialize RegimeDetectionAgent ───────────────────────────────
+	regimeAgent := agents.NewRegimeDetectionAgentWithConfig(agents.RegimeConfig{
+		ADXPeriod:    cfg.RegimeDetect.ADXPeriod,
+		ATRPeriod:    cfg.RegimeDetect.ATRPeriod,
+		ADXThreshold: cfg.RegimeDetect.ADXThreshold,
+		VolThreshold: cfg.RegimeDetect.VolThreshold,
+	})
+	slog.Info("Agent initialized", "agent", regimeAgent.Name())
+
 	// ── Initialize Agent 3: FundamentalAgent ──────────────────────────
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     cfg.Redis.Address,
@@ -199,7 +208,7 @@ func main() {
 					wg.Add(1)
 					go func(pair string) {
 						defer wg.Done()
-						runPipeline(ctx, pair, cfg, marketAgent, technicalAgent, fundamentalAgent,
+						runPipeline(ctx, pair, cfg, marketAgent, regimeAgent, technicalAgent, fundamentalAgent,
 							riskAgent, decisionAgent, whatsAppAgent, chatHandler, store)
 					}(pair)
 				}
@@ -232,6 +241,7 @@ func runPipeline(
 	pair string,
 	cfg *config.Config,
 	marketAgent *agents.MarketDataAgent,
+	regimeAgent *agents.RegimeDetectionAgent,
 	technicalAgent *agents.TechnicalAgent,
 	fundamentalAgent *agents.FundamentalAgent,
 	riskAgent *agents.RiskAgent,
@@ -262,6 +272,17 @@ func runPipeline(
 		}()
 	}
 
+	// ── Regime Detection: klasifikasi kondisi pasar ───────────────────
+	regimeCtx := regimeAgent.Detect(ctx, pair, candles)
+	slog.Debug("🔍 RegimeDetection completed",
+		"pair", pair,
+		"regime", string(regimeCtx.Regime),
+		"adx", fmt.Sprintf("%.2f", regimeCtx.ADX),
+		"atr", fmt.Sprintf("%.6f", regimeCtx.ATR),
+		"volatility", fmt.Sprintf("%.4f", regimeCtx.Volatility),
+		"trend_strength", fmt.Sprintf("%.2f", regimeCtx.TrendStrength),
+	)
+
 	// ── Agent 2 + 3: Technical & Fundamental Analysis (CONCURRENT) ────
 	var techOutput, fundOutput agents.AgentOutput
 
@@ -271,6 +292,7 @@ func runPipeline(
 		techOutput = technicalAgent.Run(gCtx, agents.AgentInput{
 			Pair:    pair,
 			Candles: candles,
+			Regime:  &regimeCtx,
 		})
 		if techOutput.Success && techOutput.Technical != nil {
 			slog.Debug("✅ TechnicalAgent completed",
@@ -286,7 +308,7 @@ func runPipeline(
 	})
 
 	g.Go(func() error {
-		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair})
+		fundOutput = fundamentalAgent.Run(gCtx, agents.AgentInput{Pair: pair, Regime: &regimeCtx})
 		if fundOutput.Success && fundOutput.Fundamental != nil {
 			slog.Debug("✅ FundamentalAgent completed",
 				"pair", pair,
@@ -309,6 +331,7 @@ func runPipeline(
 		Pair:           pair,
 		Candles:        candles,
 		Technical:      techOutput.Technical,
+		Regime:         &regimeCtx,
 		AccountBalance: cfg.Account.Balance,
 		RiskPercent:    cfg.Account.RiskPercent,
 	}
@@ -331,6 +354,7 @@ func runPipeline(
 		Technical:      techOutput.Technical,
 		Fundamental:    fundOutput.Fundamental,
 		Risk:           riskOutput.Risk,
+		Regime:         &regimeCtx,
 		AccountBalance: cfg.Account.Balance,
 		RiskPercent:    cfg.Account.RiskPercent,
 	}
@@ -344,6 +368,7 @@ func runPipeline(
 			"signal", d.Signal,
 			"confidence", fmt.Sprintf("%.0f%%", d.Confidence*100),
 			"risk_level", d.RiskLevel,
+			"regime", d.Regime,
 			"tech_signal", d.TechSignal,
 			"fund_sentiment", d.FundSentiment,
 		)
