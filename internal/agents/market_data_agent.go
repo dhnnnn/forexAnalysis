@@ -153,36 +153,121 @@ func (a *MarketDataAgent) Run(ctx context.Context, input AgentInput) AgentOutput
 // Data Collection — berjalan di background goroutine
 // ════════════════════════════════════════════════════════════════════════
 
-// StartCollecting memulai goroutine background yang mendengarkan
-// candle dari WebSocket feed dan menyimpannya ke rolling buffer.
+// StartCollecting memulai goroutine background yang mengumpulkan candle data.
+// Strategi fallback:
+//   1. Twelve Data REST API (primary — data real)
+//   2. OANDA WebSocket (fallback 1 — jika Twelve Data key kosong/gagal)
+//   3. Mock WebSocket (fallback terakhir — jika semua API mati)
 func (a *MarketDataAgent) StartCollecting(ctx context.Context) {
-	if a.wsFeed == nil {
-		slog.Warn("MarketDataAgent: no WebSocket feed configured, skipping collection")
+	// Primary: Twelve Data REST (data real, reliable, free tier 800 req/day)
+	if a.restPoller != nil && a.restPoller.HasAPIKey() {
+		slog.Info("MarketDataAgent: using Twelve Data REST API (primary)")
+		go a.pollREST(ctx)
 		return
 	}
 
-	// Start WebSocket feed
-	a.wsFeed.Start(ctx)
+	// Fallback 1: OANDA WebSocket
+	if a.wsFeed != nil && a.wsFeed.HasAPIKey() {
+		slog.Info("MarketDataAgent: using OANDA WebSocket (fallback 1)")
+		a.wsFeed.Start(ctx)
+		go a.consumeWebSocket(ctx)
+		return
+	}
 
-	// Goroutine consumer: baca dari feed channel, simpan ke buffer
-	go func() {
-		slog.Info("MarketDataAgent: collecting candles from feed...",
-			"pairs", a.pairs)
+	// Fallback terakhir: Mock WebSocket (sinusoidal data untuk development)
+	if a.wsFeed != nil {
+		slog.Warn("MarketDataAgent: all API keys unavailable, using MOCK data")
+		a.wsFeed.Start(ctx)
+		go a.consumeWebSocket(ctx)
+		return
+	}
 
-		for {
-			select {
-			case <-ctx.Done():
-				slog.Info("MarketDataAgent: collection stopped")
-				return
-			case raw, ok := <-a.wsFeed.Output:
-				if !ok {
-					slog.Info("MarketDataAgent: feed channel closed")
-					return
+	slog.Warn("MarketDataAgent: no data source configured, using pre-populated mock data only")
+}
+
+// consumeWebSocket membaca dari WebSocket feed channel.
+// Jika channel closed, fallback ke REST polling (jika tersedia).
+func (a *MarketDataAgent) consumeWebSocket(ctx context.Context) {
+	slog.Info("MarketDataAgent: WebSocket consumer started", "pairs", a.pairs)
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("MarketDataAgent: collection stopped")
+			return
+		case raw, ok := <-a.wsFeed.Output:
+			if !ok {
+				slog.Warn("MarketDataAgent: WebSocket feed closed, switching to REST polling")
+				if a.restPoller != nil && a.restPoller.HasAPIKey() {
+					go a.pollREST(ctx)
 				}
-				a.ingestCandle(raw)
+				return
 			}
+			a.ingestCandle(raw)
 		}
-	}()
+	}
+}
+
+// pollREST melakukan polling periodik ke Twelve Data REST API.
+// Interval: 1 menit (hemat API quota — free tier = 800 req/day).
+func (a *MarketDataAgent) pollREST(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	slog.Info("MarketDataAgent: REST polling started",
+		"pairs", a.pairs,
+		"interval", "1m",
+	)
+
+	// Initial fetch langsung (jangan tunggu ticker pertama)
+	a.fetchFromREST(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			slog.Info("MarketDataAgent: REST polling stopped")
+			return
+		case <-ticker.C:
+			a.fetchFromREST(ctx)
+		}
+	}
+}
+
+// fetchFromREST mengambil candle terbaru dari REST API untuk semua pairs.
+func (a *MarketDataAgent) fetchFromREST(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	for _, pair := range a.pairs {
+		tf := a.defaultTimeframe()
+
+		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		candles, err := a.restPoller.FetchCandles(fetchCtx, pair, tf, 30)
+		cancel()
+
+		if err != nil {
+			slog.Debug("MarketDataAgent: REST fetch failed",
+				"pair", pair,
+				"error", err,
+			)
+			continue
+		}
+
+		ingested := 0
+		for _, c := range candles {
+			a.ingestCandle(c)
+			ingested++
+		}
+
+		if ingested > 0 {
+			slog.Debug("MarketDataAgent: REST candles ingested",
+				"pair", pair,
+				"count", ingested,
+				"timeframe", tf,
+			)
+		}
+	}
 }
 
 // ingestCandle mereplikasi dan mengupdate/menambahkan candle ke semua buffer timeframe yang terdaftar.

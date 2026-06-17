@@ -31,6 +31,11 @@ func NewRESTPoller(baseURL, apiKey string, pairs []string) *RESTPoller {
 	}
 }
 
+// HasAPIKey returns true jika API key tersedia dan tidak kosong.
+func (p *RESTPoller) HasAPIKey() bool {
+	return p.apiKey != "" && p.apiKey != "${TWELVE_DATA_KEY}"
+}
+
 // TwelveDataResponse adalah response dari Twelve Data time_series endpoint.
 type TwelveDataResponse struct {
 	Values []TwelveDataValue `json:"values"`

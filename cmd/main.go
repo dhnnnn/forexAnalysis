@@ -19,10 +19,17 @@ import (
 	"github.com/dhnnnn/forexAnalysis/internal/pipeline"
 	"github.com/dhnnnn/forexAnalysis/internal/sentiment"
 	"github.com/dhnnnn/forexAnalysis/internal/storage"
+	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
 )
 
 func main() {
+	// ── Load .env file ────────────────────────────────────────────────
+	if err := godotenv.Load(); err != nil {
+		// .env file tidak wajib ada (e.g. di Docker, env vars di-set langsung)
+		slog.Debug(".env file not found, using system environment variables")
+	}
+
 	// ── Setup structured logging ──────────────────────────────────────
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelDebug,

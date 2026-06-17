@@ -31,6 +31,11 @@ func NewWebSocketFeed(url, apiKey string, pairs []string) *WebSocketFeed {
 	}
 }
 
+// HasAPIKey returns true jika API key tersedia dan tidak kosong.
+func (f *WebSocketFeed) HasAPIKey() bool {
+	return f.apiKey != "" && f.apiKey != "${OANDA_API_KEY}"
+}
+
 // Start memulai koneksi WebSocket dan mulai mengirim candle ke channel Output.
 // Untuk MVP: menghasilkan mock candle setiap interval.
 // TODO Minggu 2: ganti dengan koneksi WebSocket nyata ke OANDA.
